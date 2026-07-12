@@ -3,6 +3,9 @@ import { openDB } from "idb";
 const DB_NAME = "reimbursement-app";
 const DB_VERSION = 1;
 
+// 邮箱同步的待分配池：documents.reimbursementId 用这个特殊值，不属于任何报销
+export const INBOX_ID = "_inbox";
+
 let dbPromise;
 
 function getDb() {
@@ -48,12 +51,14 @@ export async function listReimbursements() {
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export async function createReimbursement(name) {
+export async function createReimbursement(name, extras = {}) {
   const db = await getDb();
   const item = {
     id: makeId("r"),
     name: name.trim(),
     createdAt: new Date().toISOString(),
+    periodStart: extras.periodStart || "",
+    periodEnd: extras.periodEnd || "",
   };
   await db.add("reimbursements", item);
   return item;
