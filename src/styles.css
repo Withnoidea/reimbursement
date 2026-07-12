@@ -1122,6 +1122,60 @@ td {
   color: var(--muted);
 }
 
+.moveDialog {
+  width: min(440px, calc(100vw - 56px));
+}
+
+.moveList {
+  display: grid;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.moveOption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.moveOption.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.moveOption em {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-style: normal;
+  font-size: 12px;
+}
+
+.moveDivider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.moveDivider::before,
+.moveDivider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--row-border);
+}
+
 @media (max-width: 1180px) {
   .contentGrid {
     grid-template-columns: 1fr;

@@ -1,5 +1,6 @@
 import { app, safeStorage } from "electron";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import os from "node:os";
@@ -12,7 +13,7 @@ const DEFAULT_CONFIG = {
   port: 993,
   user: "",
   folder: "INBOX",
-  days: 90,
+  days: 30,
   subjectKeyword: "",
 };
 
@@ -351,6 +352,7 @@ async function addPdfItem({ data, fileName, uid, subject, items, stats, tempRoot
     fileName: safeName,
     size: data.length,
     data,
+    fileHash: createHash("sha256").update(data).digest("hex"),
     amount: parsed?.amount ?? null,
     invoiceNo: parsed?.invoiceNo || "",
     invoiceDate: parsed?.invoiceDate || "",

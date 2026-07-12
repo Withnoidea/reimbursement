@@ -11,11 +11,18 @@ SMALL_AMOUNT_PATTERNS = [
     re.compile(r"小写\s*[¥￥]?\s*([0-9]+(?:\.[0-9]{1,2})?)"),
 ]
 CURRENCY_PATTERN = re.compile(r"[¥￥]\s*([0-9]+(?:\.[0-9]{1,2})?)")
-DECIMAL_AMOUNT_PATTERN = re.compile(r"\b([0-9]{1,6}\.[0-9]{2})\b")
+# 行程单、账单等无 ¥ 符号的单据：带标签的合计金额
+LABELED_AMOUNT_PATTERNS = [
+    re.compile(r"(?:价税合计|合计金额|金额合计|总计|应付金额|实付金额|实收金额|付款金额)[:：]?[¥￥]?([0-9]{1,7}(?:\.[0-9]{1,2})?)"),
+    re.compile(r"合计[:：]?[¥￥]?([0-9]{1,7}(?:\.[0-9]{1,2})?)元"),
+]
+# 前后紧邻数字或点号的不算（排除 2026.07.09 这类日期片段）
+DECIMAL_AMOUNT_PATTERN = re.compile(r"(?<![0-9.])([0-9]{1,6}\.[0-9]{2})(?![0-9.])")
 INVOICE_NO_PATTERN = re.compile(r"发票号码\s*[:：]?\s*([0-9]{8,})")
 ANY_INVOICE_NO_PATTERN = re.compile(r"\b(\d{20})\b")
 DATE_PATTERN = re.compile(r"开票日期\s*[:：]?\s*(\d{4}年\d{1,2}月\d{1,2}日)")
 ANY_DATE_PATTERN = re.compile(r"\d{4}年\d{1,2}月\d{1,2}日")
+ANY_NUMERIC_DATE_PATTERN = re.compile(r"(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})")
 DATE_PARTS_PATTERN = re.compile(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})")
 DATE_NUMBERS_PATTERN = re.compile(r"(20\d{2})\D{0,3}(\d{1,2})\D{0,3}(\d{1,2})")
 
@@ -51,11 +58,25 @@ def extract_amount(text: str):
     if values:
         return round(max(values), 2)
 
-    decimal_values = [float(value) for value in DECIMAL_AMOUNT_PATTERN.findall(text)]
+    for pattern in LABELED_AMOUNT_PATTERNS:
+        match = pattern.search(normalized)
+        if match:
+            return round(float(match.group(1)), 2)
+
+    decimal_values = [
+        float(value)
+        for value in DECIMAL_AMOUNT_PATTERN.findall(text)
+        if not looks_like_year_month(value)
+    ]
     if decimal_values:
         return round(max(decimal_values), 2)
 
     return None
+
+
+def looks_like_year_month(value: str):
+    whole, _, fraction = value.partition(".")
+    return len(fraction) == 2 and fraction.isdigit() and 1 <= int(fraction) <= 12 and 1900 <= int(whole) <= 2099
 
 
 def extract_invoice_no(text: str, lines=None):
@@ -83,7 +104,13 @@ def extract_invoice_date(text: str, lines=None):
         if date:
             return date
     fallback = ANY_DATE_PATTERN.search(text)
-    return normalize_date(fallback.group(0)) if fallback else ""
+    if fallback:
+        return normalize_date(fallback.group(0))
+    numeric = ANY_NUMERIC_DATE_PATTERN.search(normalized)
+    if numeric:
+        year, month, day = numeric.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+    return ""
 
 
 def normalize_date(value: str):

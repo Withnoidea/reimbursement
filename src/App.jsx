@@ -4,6 +4,7 @@ import {
   Download,
   Eye,
   FileText,
+  FolderInput,
   FolderOpen,
   Mail,
   MoreHorizontal,
@@ -201,6 +202,7 @@ export default function App() {
           size: file.size,
           uploadedAt: new Date().toISOString(),
           fileBlob: file,
+          fileHash: await hashBlob(file),
         });
       } catch (error) {
         failures.push(`${file.name}: ${error.message}`);
@@ -249,16 +251,20 @@ export default function App() {
         return;
       }
 
-      const known = collectKnownInvoiceNos(await listAllDocuments());
+      const allDocs = await listAllDocuments();
+      const known = collectKnownInvoiceNos(allDocs);
+      const knownHashes = await collectKnownFileHashes(allDocs);
       let added = 0;
       let duplicated = 0;
       for (const item of result.items) {
         const invoiceNo = String(item.invoiceNo || "").trim();
-        if (invoiceNo && known.has(invoiceNo)) {
+        const fileHash = item.fileHash || "";
+        if ((invoiceNo && known.has(invoiceNo)) || (fileHash && knownHashes.has(fileHash))) {
           duplicated += 1;
           continue;
         }
         if (invoiceNo) known.add(invoiceNo);
+        if (fileHash) knownHashes.add(fileHash);
         await addDocument({
           id: makeId("d"),
           reimbursementId: active.id,
@@ -271,6 +277,7 @@ export default function App() {
           size: item.size || 0,
           uploadedAt: new Date().toISOString(),
           fileBlob: new Blob([item.data], { type: "application/pdf" }),
+          fileHash: fileHash || null,
         });
         added += 1;
       }
@@ -364,6 +371,7 @@ export default function App() {
             size: item.size || 0,
             uploadedAt: item.uploadedAt || new Date().toISOString(),
             fileBlob: item.fileBlob || null,
+            fileHash: item.fileHash || null,
           });
         }
         await deleteDocuments([doc.id]);
@@ -415,6 +423,37 @@ export default function App() {
     if (next.has(id)) next.delete(id);
     else next.add(id);
     setSelectedIds(next);
+  }
+
+  function toggleSelectAllVisible() {
+    const next = new Set(selectedIds);
+    const allSelected = visibleDocuments.length > 0 && visibleDocuments.every((doc) => next.has(doc.id));
+    if (allSelected) visibleDocuments.forEach((doc) => next.delete(doc.id));
+    else visibleDocuments.forEach((doc) => next.add(doc.id));
+    setSelectedIds(next);
+  }
+
+  function handleMoveDocuments() {
+    if (!active || selectedDocs.length === 0) return;
+    setDialog({ type: "moveDocuments", docs: selectedDocs });
+  }
+
+  async function moveDocumentsTo(docs, target) {
+    let targetId = target.id || "";
+    let targetName = target.name || "";
+    if (!targetId && target.createName) {
+      const item = await createReimbursement(target.createName);
+      targetId = item.id;
+      targetName = item.name;
+    }
+    if (!targetId) return;
+    for (const doc of docs) {
+      await updateDocument(doc.id, { reimbursementId: targetId });
+    }
+    await refreshDocuments(activeId);
+    await refreshReimbursements(activeId);
+    setDialog(null);
+    setToast(`已移动 ${docs.length} 张单据到「${targetName}」`);
   }
 
   function handleSort(field) {
@@ -560,6 +599,10 @@ export default function App() {
                   <Archive size={17} />
                   导出所选
                 </button>
+                <button className="ghostButton" disabled={selectedIds.size === 0} onClick={handleMoveDocuments}>
+                  <FolderInput size={17} />
+                  移动
+                </button>
                 <button className="ghostButton" disabled={selectedIds.size < 2} onClick={handleMergeDocuments}>
                   <Archive size={17} />
                   合并
@@ -578,7 +621,20 @@ export default function App() {
               <table>
                 <thead>
                   <tr>
-                    <th className="checkCol"></th>
+                    <th className="checkCol">
+                      <input
+                        type="checkbox"
+                        title="全选当前列表"
+                        disabled={visibleDocuments.length === 0}
+                        checked={visibleDocuments.length > 0 && visibleDocuments.every((doc) => selectedIds.has(doc.id))}
+                        ref={(el) => {
+                          if (!el) return;
+                          const selectedCount = visibleDocuments.filter((doc) => selectedIds.has(doc.id)).length;
+                          el.indeterminate = selectedCount > 0 && selectedCount < visibleDocuments.length;
+                        }}
+                        onChange={toggleSelectAllVisible}
+                      />
+                    </th>
                     <SortableTh field="name" sortConfig={sortConfig} onSort={handleSort}>单据</SortableTh>
                     <SortableTh field="amount" sortConfig={sortConfig} onSort={handleSort}>金额</SortableTh>
                     <SortableTh field="invoiceNo" sortConfig={sortConfig} onSort={handleSort}>发票号码</SortableTh>
@@ -730,7 +786,16 @@ export default function App() {
           onSaved={() => setToast("邮箱设置已保存")}
         />
       )}
-      {dialog && dialog.type !== "preferences" && dialog.type !== "mailSettings" && (
+      {dialog?.type === "moveDocuments" && (
+        <MoveDialog
+          docs={dialog.docs}
+          reimbursements={reimbursements}
+          activeId={activeId}
+          onClose={() => setDialog(null)}
+          onMove={(target) => moveDocumentsTo(dialog.docs, target)}
+        />
+      )}
+      {dialog && dialog.type !== "preferences" && dialog.type !== "mailSettings" && dialog.type !== "moveDocuments" && (
         <EditDialog
           dialog={dialog}
           onClose={() => setDialog(null)}
@@ -834,6 +899,7 @@ function flattenMergedItems(doc) {
       size: doc.size,
       uploadedAt: doc.uploadedAt,
       fileBlob: doc.fileBlob,
+      fileHash: doc.fileHash || null,
     },
   ];
 }
@@ -857,6 +923,40 @@ function collectKnownInvoiceNos(docs) {
     for (const item of doc.mergedItems || []) push(item.invoiceNo);
   }
   return known;
+}
+
+async function hashBlob(blob) {
+  const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// 收集库内全部文件哈希；旧数据没存过哈希的现算并回填，之后同步就不用重复计算
+async function collectKnownFileHashes(docs) {
+  const hashes = new Set();
+  for (const doc of docs) {
+    const changes = {};
+    if (doc.fileBlob) {
+      if (!doc.fileHash) {
+        doc.fileHash = await hashBlob(doc.fileBlob);
+        changes.fileHash = doc.fileHash;
+      }
+      hashes.add(doc.fileHash);
+    }
+    if (doc.mergedItems?.length) {
+      let itemsChanged = false;
+      for (const item of doc.mergedItems) {
+        if (!item.fileBlob) continue;
+        if (!item.fileHash) {
+          item.fileHash = await hashBlob(item.fileBlob);
+          itemsChanged = true;
+        }
+        hashes.add(item.fileHash);
+      }
+      if (itemsChanged) changes.mergedItems = doc.mergedItems;
+    }
+    if (Object.keys(changes).length > 0) await updateDocument(doc.id, changes);
+  }
+  return hashes;
 }
 
 function mergedSearchText(doc) {
@@ -965,7 +1065,7 @@ function MailSettingsDialog({ onClose, onSaved }) {
         port: String(config?.port || 993),
         user: config?.user || "",
         folder: config?.folder || "INBOX",
-        days: String(config?.days || 90),
+        days: String(config?.days || 30),
         subjectKeyword: config?.subjectKeyword || "",
       });
       setHasAuth(Boolean(config?.hasAuth));
@@ -983,7 +1083,7 @@ function MailSettingsDialog({ onClose, onSaved }) {
       port: Number(form.port) || 993,
       user: form.user.trim(),
       folder: form.folder.trim() || "INBOX",
-      days: Number(form.days) || 90,
+      days: Number(form.days) || 30,
       subjectKeyword: form.subjectKeyword.trim(),
     };
   }
@@ -1074,7 +1174,7 @@ function MailSettingsDialog({ onClose, onSaved }) {
             </label>
             <label className="mailField">
               <span>首次同步范围（天）</span>
-              <input value={form.days} onChange={update("days")} inputMode="numeric" placeholder="90" />
+              <input value={form.days} onChange={update("days")} inputMode="numeric" placeholder="30" />
             </label>
           </div>
           <label className="mailField">
@@ -1208,6 +1308,73 @@ function PreviewModal({ preview, onClose }) {
           {url ? <iframe title={currentItem.name || preview.doc.name} src={url}></iframe> : <div className="emptyPreview">没有可预览的 PDF</div>}
         </div>
       </div>
+    </div>
+  );
+}
+
+function MoveDialog({ docs, reimbursements, activeId, onClose, onMove }) {
+  const [targetId, setTargetId] = useState("");
+  const [createName, setCreateName] = useState("");
+  const [moving, setMoving] = useState(false);
+  const others = reimbursements.filter((item) => item.id !== activeId);
+  const targetItem = others.find((item) => item.id === targetId) || null;
+  const canSubmit = Boolean(targetItem || createName.trim());
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    if (!canSubmit || moving) return;
+    setMoving(true);
+    try {
+      await onMove(targetItem ? { id: targetItem.id, name: targetItem.name } : { createName: createName.trim() });
+    } finally {
+      setMoving(false);
+    }
+  }
+
+  return (
+    <div className="modalBackdrop">
+      <form className="dialog moveDialog" onSubmit={handleSubmit}>
+        <div className="dialogHeader">
+          <strong>移动 {docs.length} 张单据</strong>
+          <button type="button" onClick={onClose}><X size={18} /></button>
+        </div>
+        {others.length > 0 ? (
+          <div className="moveList">
+            {others.map((item) => (
+              <button
+                type="button"
+                key={item.id}
+                className={`moveOption ${item.id === targetId ? "active" : ""}`}
+                onClick={() => {
+                  setTargetId(item.id === targetId ? "" : item.id);
+                  setCreateName("");
+                }}
+              >
+                <span><EllipsisText value={item.name} /></span>
+                <em>{item.documentCount} 张 / {money(item.totalAmount)} 元</em>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="dialogMessage">还没有其他报销，可以直接新建一个并移入：</p>
+        )}
+        <div className="moveDivider">或新建报销并移入</div>
+        <input
+          type="text"
+          placeholder="新报销名称"
+          value={createName}
+          onChange={(event) => {
+            setCreateName(event.target.value);
+            if (event.target.value.trim()) setTargetId("");
+          }}
+        />
+        <div className="dialogActions">
+          <button type="button" className="ghostButton" onClick={onClose}>取消</button>
+          <button type="submit" className="primaryButton" disabled={!canSubmit || moving}>
+            {moving ? "移动中…" : "移动"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

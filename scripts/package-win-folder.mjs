@@ -26,6 +26,7 @@ await packager({
     /^\/packaged($|\/)/,
     /^\/dist-electron($|\/)/,
     /^\/node_modules($|\/)/,
+    /^\/pdf($|\/)/,
     /^\/.*\.pdf$/,
     /^\/[^/]+\.md$/,
     /\.log$/,

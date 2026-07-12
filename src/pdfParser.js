@@ -10,11 +10,18 @@ const smallAmountPatterns = [
   /小写\s*[¥￥]?\s*([0-9]+(?:\.[0-9]{1,2})?)/,
 ];
 const currencyPattern = /[¥￥]\s*([0-9]+(?:\.[0-9]{1,2})?)/g;
-const decimalAmountPattern = /\b([0-9]{1,6}\.[0-9]{2})\b/g;
+// 行程单、账单等无 ¥ 符号的单据：带标签的合计金额
+const labeledAmountPatterns = [
+  /(?:价税合计|合计金额|金额合计|总计|应付金额|实付金额|实收金额|付款金额)[:：]?[¥￥]?([0-9]{1,7}(?:\.[0-9]{1,2})?)/,
+  /合计[:：]?[¥￥]?([0-9]{1,7}(?:\.[0-9]{1,2})?)元/,
+];
+// 前后紧邻数字或点号的不算（排除 2026.07.09 这类日期片段）
+const decimalAmountPattern = /(?<![0-9.])([0-9]{1,6}\.[0-9]{2})(?![0-9.])/g;
 const invoiceNoPattern = /发票号码\s*[:：]?\s*([0-9]{8,})/;
 const anyInvoiceNoPattern = /\b(\d{20})\b/;
 const datePattern = /开票日期\s*[:：]?\s*(\d{4}年\d{1,2}月\d{1,2}日)/;
 const anyDatePattern = /\d{4}年\d{1,2}月\d{1,2}日/;
+const anyNumericDatePattern = /(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})/;
 const datePartsPattern = /(\d{4})\D+(\d{1,2})\D+(\d{1,2})/;
 const dateNumbersPattern = /(20\d{2})\D{0,3}(\d{1,2})\D{0,3}(\d{1,2})/;
 
@@ -66,10 +73,25 @@ function extractAmount(text) {
   const values = [...text.matchAll(currencyPattern)].map((match) => Number(match[1]));
   if (values.length > 0) return roundMoney(Math.max(...values));
 
-  const decimalValues = [...text.matchAll(decimalAmountPattern)].map((match) => Number(match[1]));
+  for (const pattern of labeledAmountPatterns) {
+    const match = normalized.match(pattern);
+    if (match) return roundMoney(match[1]);
+  }
+
+  const decimalValues = [...text.matchAll(decimalAmountPattern)]
+    .map((match) => match[1])
+    .filter((value) => !looksLikeYearMonth(value))
+    .map(Number);
   if (decimalValues.length > 0) return roundMoney(Math.max(...decimalValues));
 
   return null;
+}
+
+function looksLikeYearMonth(value) {
+  const [whole, fraction = ""] = String(value).split(".");
+  const month = Number(fraction);
+  const year = Number(whole);
+  return fraction.length === 2 && month >= 1 && month <= 12 && year >= 1900 && year <= 2099;
 }
 
 function extractInvoiceNo(text, lines = []) {
@@ -94,7 +116,14 @@ function extractInvoiceDate(text, lines = []) {
   if (positionedDate) return positionedDate;
 
   const fallback = text.match(anyDatePattern)?.[0];
-  return fallback ? normalizeDate(fallback) : "";
+  if (fallback) return normalizeDate(fallback);
+
+  const numeric = normalized.match(anyNumericDatePattern);
+  if (numeric) {
+    const [, year, month, day] = numeric;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+  return "";
 }
 
 function roundMoney(value) {
