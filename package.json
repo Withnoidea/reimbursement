@@ -1,0 +1,64 @@
+{
+  "name": "reimbursement-desktop",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "postinstall": "node scripts/prepare-pdf-assets.mjs && node scripts/prepare-mail-deps.mjs",
+    "start": "node scripts/start-desktop.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "desktop": "electron .",
+    "build": "node scripts/prepare-pdf-assets.mjs && node scripts/prepare-mail-deps.mjs && vite build",
+    "package:win": "npm run build && electron-builder --win portable",
+    "package:win-folder": "npm run build && node scripts/package-win-folder.mjs",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "idb": "^8.0.3",
+    "imapflow": "^1.4.7",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.468.0",
+    "mailparser": "^3.9.14",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vite": "^7.0.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.0.2",
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.local.reimbursement",
+    "productName": "报销单据管理",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "tools",
+        "to": "tools"
+      },
+      {
+        "from": ".venv",
+        "to": ".venv",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+dist-electron/
+packaged/
+release/
+
+# 脚本生成的资源（npm install / npm run build 时自动重建）
+# - public/cmaps、public/standard_fonts：scripts/prepare-pdf-assets.mjs
+# - electron/vendor：scripts/prepare-mail-deps.mjs
+public/cmaps/
+public/standard_fonts/
+electron/vendor/
+
+# Python 虚拟环境（重建：python -m venv .venv && .venv/Scripts/pip install -r requirements.txt）
+.venv/
+
+# 日志与临时文件
+*.log
+*.tmp
+
+# 本机个人配置
+.claude/settings.local.json
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
