@@ -6,6 +6,7 @@ import {
   FileText,
   FolderInput,
   FolderOpen,
+  Home,
   Inbox,
   Mail,
   MoreHorizontal,
@@ -85,9 +86,10 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
   const [sortConfig, setSortConfig] = useState({ field: "uploadedAt", direction: "desc" });
   const [theme, setTheme] = useState(getInitialTheme);
-  const [view, setView] = useState("reimbursement");
+  const [view, setView] = useState("home");
   const [inboxDocs, setInboxDocs] = useState([]);
   const [inboxSelectedIds, setInboxSelectedIds] = useState(new Set());
+  const [allDocs, setAllDocs] = useState([]);
 
   const active = reimbursements.find((item) => item.id === activeId) || null;
   const canMailSync = Boolean(window.desktopApi?.syncMailbox);
@@ -135,6 +137,17 @@ export default function App() {
     if (activeId) refreshDocuments(activeId);
     else setDocuments([]);
   }, [activeId]);
+
+  useEffect(() => {
+    if (view !== "home") return;
+    let cancelled = false;
+    listAllDocuments().then((docs) => {
+      if (!cancelled) setAllDocs(docs);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, reimbursements, inboxDocs]);
 
   function openPreferences() {
     setDialog({ type: "preferences" });
@@ -298,6 +311,7 @@ export default function App() {
           fileBlob: new Blob([item.data], { type: "application/pdf" }),
           fileHash: fileHash || null,
           sourceSubject: item.subject || "",
+          sourceDate: item.sourceDate || "",
         });
         added += 1;
       }
@@ -306,7 +320,10 @@ export default function App() {
       await refreshInbox();
       setView("inbox");
 
-      const parts = [`扫描 ${result.stats.scanned} 封${full ? "" : "新"}邮件`];
+      const rangeText = result.stats.sinceDate
+        ? `扫描 ${result.stats.scanned} 封邮件（${result.stats.sinceDate} 以来）`
+        : `扫描 ${result.stats.scanned} 封上次同步后的新邮件`;
+      const parts = [rangeText];
       if (added > 0) parts.push(`新收 ${added} 张发票待分配`);
       if (duplicated > 0) parts.push(`跳过重复 ${duplicated} 张`);
       if (result.stats.skippedOfd > 0) parts.push(`${result.stats.skippedOfd} 个 OFD 文件暂不支持`);
@@ -569,26 +586,24 @@ export default function App() {
           </div>
         </div>
 
+        <button
+          className={`syncNavButton ${view === "home" ? "active" : ""}`}
+          onClick={() => setView("home")}
+        >
+          <span className="navIcon">
+            <Home size={18} />
+          </span>
+          <span className="navText">
+            <strong>首页</strong>
+            <em>数据总览与邮箱同步</em>
+          </span>
+          {inboxDocs.length > 0 && <span className="syncBadge">{inboxDocs.length}</span>}
+        </button>
+
         <button className="primaryButton full" onClick={() => setDialog({ type: "reimbursement", mode: "create" })}>
           <Plus size={17} />
           新建报销
         </button>
-
-        {canMailSync && (
-          <button
-            className={`syncNavButton ${view === "inbox" ? "active" : ""}`}
-            onClick={() => setView("inbox")}
-          >
-            <span className="navIcon">
-              <Inbox size={18} />
-            </span>
-            <span className="navText">
-              <strong>邮箱同步</strong>
-              <em>{inboxDocs.length > 0 ? `${inboxDocs.length} 张待分配` : "拉取邮箱发票"}</em>
-            </span>
-            {inboxDocs.length > 0 && <span className="syncBadge">{inboxDocs.length}</span>}
-          </button>
-        )}
 
         <div className="navList">
           {reimbursements.map((item) => (
@@ -628,7 +643,23 @@ export default function App() {
       </aside>
 
       <main className="workspace">
-        {view === "inbox" ? (
+        {view === "home" ? (
+          <DashboardWorkspace
+            reimbursements={reimbursements}
+            docs={allDocs.filter((doc) => doc.reimbursementId !== INBOX_ID)}
+            inboxCount={inboxDocs.length}
+            busy={busy}
+            canMailSync={canMailSync}
+            onSync={() => handleMailSync()}
+            onFullSync={() => handleMailSync({ full: true })}
+            onOpenSettings={() => setDialog({ type: "mailSettings" })}
+            onOpenInbox={() => setView("inbox")}
+            onOpenReimbursement={(id) => {
+              setActiveId(id);
+              setView("reimbursement");
+            }}
+          />
+        ) : view === "inbox" ? (
           <InboxWorkspace
             docs={inboxDocs}
             selectedIds={inboxSelectedIds}
@@ -1466,6 +1497,260 @@ function PreviewModal({ preview, onClose }) {
   );
 }
 
+function DashboardWorkspace({
+  reimbursements,
+  docs,
+  inboxCount,
+  busy,
+  canMailSync,
+  onSync,
+  onFullSync,
+  onOpenSettings,
+  onOpenInbox,
+  onOpenReimbursement,
+}) {
+  const totalAmount = reimbursements.reduce((sum, item) => sum + Number(item.totalAmount || 0), 0);
+  const totalCount = reimbursements.reduce((sum, item) => sum + Number(item.documentCount || 0), 0);
+
+  const months = useMemo(() => {
+    const now = new Date();
+    const list = [];
+    for (let i = 5; i >= 0; i -= 1) {
+      const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      list.push({
+        key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
+        label: `${date.getMonth() + 1}月`,
+        full: `${date.getFullYear()}年${date.getMonth() + 1}月`,
+        amount: 0,
+        count: 0,
+      });
+    }
+    const index = new Map(list.map((month) => [month.key, month]));
+    for (const doc of docs) {
+      const date = formatInvoiceDate(doc.invoiceDate) || String(doc.uploadedAt || "").slice(0, 10);
+      const month = index.get(date.slice(0, 7));
+      if (!month) continue;
+      month.amount += Number(doc.amount || 0);
+      month.count += 1;
+    }
+    for (const month of list) month.amount = Math.round(month.amount * 100) / 100;
+    return list;
+  }, [docs]);
+
+  const hasTrend = months.some((month) => month.count > 0);
+  const topReimbursements = [...reimbursements]
+    .sort((a, b) => Number(b.totalAmount || 0) - Number(a.totalAmount || 0))
+    .slice(0, 6);
+  const maxAmount = Math.max(...topReimbursements.map((item) => Number(item.totalAmount || 0)), 1);
+
+  return (
+    <>
+      <header className="topbar">
+        <div>
+          <h1>首页</h1>
+          <p>{reimbursements.length > 0 ? `${reimbursements.length} 个报销 · ${totalCount} 张单据` : "创建报销，或从邮箱同步发票开始"}</p>
+        </div>
+      </header>
+
+      <div className="dashboard">
+        <div className="statRow">
+          <div className="statTile heroTile">
+            <label>报销总金额</label>
+            <strong>¥{money(totalAmount)}</strong>
+          </div>
+          <div className="statTile">
+            <label>单据总数</label>
+            <strong>{totalCount}</strong>
+          </div>
+          <div className="statTile">
+            <label>报销个数</label>
+            <strong>{reimbursements.length}</strong>
+          </div>
+          <button type="button" className="statTile clickable" onClick={onOpenInbox}>
+            <label>待分配发票</label>
+            <strong>{inboxCount}</strong>
+          </button>
+        </div>
+
+        <div className={`dashRow ${canMailSync ? "" : "single"}`}>
+          <section className="dashCard">
+            <div className="dashCardHeader">
+              <strong>近 6 个月单据金额</strong>
+              <span>按开票日期统计</span>
+            </div>
+            {hasTrend ? (
+              <MonthlyLineChart months={months} />
+            ) : (
+              <div className="chartEmpty">上传或同步发票后，这里会显示金额趋势</div>
+            )}
+          </section>
+
+          {canMailSync && (
+            <section className="dashCard syncCard">
+              <div className="dashCardHeader">
+                <strong>邮箱同步</strong>
+                <button
+                  type="button"
+                  className="ghostButton iconOnlyButton"
+                  title="邮箱同步设置"
+                  disabled={Boolean(busy)}
+                  onClick={onOpenSettings}
+                >
+                  <Settings size={17} />
+                </button>
+              </div>
+              <p className="syncCardText">
+                {inboxCount > 0 ? `有 ${inboxCount} 张发票待分配到报销` : "从邮箱拉取发票附件，自动识别金额、发票号和日期"}
+              </p>
+              <div className="syncCardActions">
+                <button className="primaryButton" disabled={Boolean(busy)} onClick={onSync}>
+                  <RefreshCw size={17} />
+                  同步邮箱
+                </button>
+                <button className="ghostButton" disabled={Boolean(busy)} onClick={onOpenInbox}>
+                  <Inbox size={17} />
+                  查看待分配{inboxCount > 0 ? `（${inboxCount}）` : ""}
+                </button>
+                <button
+                  className="ghostButton"
+                  disabled={Boolean(busy)}
+                  title="忽略同步进度，重新拉取时间范围内的全部邮件；已有发票自动去重"
+                  onClick={onFullSync}
+                >
+                  <RotateCcw size={17} />
+                  全部重新拉取
+                </button>
+              </div>
+            </section>
+          )}
+        </div>
+
+        <section className="dashCard">
+          <div className="dashCardHeader">
+            <strong>各报销金额对比</strong>
+            <span>点击进入对应报销</span>
+          </div>
+          {topReimbursements.length > 0 ? (
+            <div className="barList">
+              {topReimbursements.map((item) => (
+                <button type="button" key={item.id} className="barRow" onClick={() => onOpenReimbursement(item.id)}>
+                  <span className="barName" title={item.name}>{item.name}</span>
+                  <span className="barTrack">
+                    <span
+                      className="barFill"
+                      style={{
+                        width: `${Math.max((Number(item.totalAmount || 0) / maxAmount) * 100, Number(item.totalAmount || 0) > 0 ? 2 : 0)}%`,
+                      }}
+                    />
+                  </span>
+                  <span className="barValue">¥{money(item.totalAmount || 0)}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="chartEmpty">还没有报销，点击左侧「新建报销」创建一个</div>
+          )}
+        </section>
+      </div>
+    </>
+  );
+}
+
+function MonthlyLineChart({ months }) {
+  const [hoverIdx, setHoverIdx] = useState(null);
+  const VB_W = 640;
+  const VB_H = 230;
+  const padL = 56;
+  const padR = 20;
+  const padT = 18;
+  const padB = 30;
+  const innerW = VB_W - padL - padR;
+  const innerH = VB_H - padT - padB;
+
+  const maxValue = niceCeil(Math.max(...months.map((month) => month.amount), 1));
+  const xAt = (i) => padL + (months.length <= 1 ? innerW / 2 : (i * innerW) / (months.length - 1));
+  const yAt = (value) => padT + innerH * (1 - value / maxValue);
+  const points = months.map((month, i) => [xAt(i), yAt(month.amount)]);
+  const linePath = points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const baseY = (padT + innerH).toFixed(1);
+  const areaPath = `${linePath} L${points[points.length - 1][0].toFixed(1)},${baseY} L${points[0][0].toFixed(1)},${baseY} Z`;
+  const ticks = [0, maxValue / 2, maxValue];
+  const lastIdx = months.length - 1;
+  const hover = hoverIdx === null ? null : { ...months[hoverIdx], x: points[hoverIdx][0], y: points[hoverIdx][1] };
+
+  function handlePointerMove(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * VB_W;
+    let nearest = 0;
+    let best = Infinity;
+    points.forEach(([px], i) => {
+      const distance = Math.abs(px - x);
+      if (distance < best) {
+        best = distance;
+        nearest = i;
+      }
+    });
+    setHoverIdx(nearest);
+  }
+
+  return (
+    <div className="chartWrap">
+      {hover && (
+        <div className="chartTip" style={{ left: `${Math.min(86, Math.max(14, (hover.x / VB_W) * 100))}%` }}>
+          <span className="chartTipKey" />
+          <strong>¥{money(hover.amount)}</strong>
+          <span>{hover.full} · {hover.count} 张</span>
+        </div>
+      )}
+      <svg
+        className="lineChart"
+        viewBox={`0 0 ${VB_W} ${VB_H}`}
+        role="img"
+        aria-label="近 6 个月单据金额趋势"
+        onPointerMove={handlePointerMove}
+        onPointerLeave={() => setHoverIdx(null)}
+      >
+        {ticks.map((tick) => (
+          <g key={tick}>
+            <line className="chartGrid" x1={padL} x2={VB_W - padR} y1={yAt(tick)} y2={yAt(tick)} />
+            <text className="chartTickLabel" x={padL - 8} y={yAt(tick) + 4} textAnchor="end">
+              {Math.round(tick).toLocaleString("zh-CN")}
+            </text>
+          </g>
+        ))}
+        {months.map((month, i) => (
+          <text key={month.key} className="chartTickLabel" x={xAt(i)} y={VB_H - 8} textAnchor="middle">
+            {month.label}
+          </text>
+        ))}
+        <path className="chartArea" d={areaPath} />
+        <path className="chartLine" d={linePath} />
+        {hover && <line className="chartCrosshair" x1={hover.x} x2={hover.x} y1={padT} y2={padT + innerH} />}
+        {points.map(([x, y], i) => {
+          if (i !== lastIdx && i !== hoverIdx) return null;
+          return <circle key={months[i].key} className="chartDot" cx={x} cy={y} r={4.5} />;
+        })}
+        <text
+          className="chartEndLabel"
+          x={points[lastIdx][0] - 4}
+          y={Math.max(points[lastIdx][1] - 10, 12)}
+          textAnchor="end"
+        >
+          ¥{money(months[lastIdx].amount)}
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+function niceCeil(value) {
+  if (value <= 0) return 1;
+  const exp = 10 ** Math.floor(Math.log10(value));
+  const fraction = value / exp;
+  const nice = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
+  return nice * exp;
+}
+
 function InboxWorkspace({
   docs,
   selectedIds,
@@ -1567,7 +1852,7 @@ function InboxWorkspace({
                 <th>金额</th>
                 <th>开票日期</th>
                 <th>来源邮件</th>
-                <th>同步时间</th>
+                <th>邮件日期</th>
                 <th className="actionCol"></th>
               </tr>
             </thead>
@@ -1594,7 +1879,7 @@ function InboxWorkspace({
                     <EllipsisText value={doc.sourceSubject} emptyText="-" />
                   </td>
                   <td>
-                    <EllipsisText value={formatDateTime(doc.uploadedAt)} />
+                    <EllipsisText value={doc.sourceDate ? formatDateTime(doc.sourceDate) : ""} emptyText="-" />
                   </td>
                   <td>
                     <div className="rowActions">

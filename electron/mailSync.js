@@ -202,30 +202,44 @@ export async function syncMailbox({ state, onProgress = () => {}, parsePdfFile }
 
         let baseline = 0;
         let query;
+        let sinceDate = null;
         if (state && String(state.uidValidity) === uidValidity && Number(state.lastUid) > 0) {
           baseline = Math.floor(Number(state.lastUid));
           query = { uid: `${baseline + 1}:*` };
         } else {
           const days = Math.max(1, Number(config.days) || DEFAULT_CONFIG.days);
-          query = { since: new Date(Date.now() - days * 86400000) };
+          sinceDate = new Date(Date.now() - days * 86400000);
+          query = { since: sinceDate };
         }
 
-        onProgress("正在查找新邮件…");
+        onProgress(sinceDate ? `正在查找 ${isoDay(sinceDate)} 以来的邮件…` : "正在查找上次同步之后的新邮件…");
         let uids = (await client.search(query, { uid: true })) || [];
         uids = [...new Set(uids)].filter((uid) => uid > baseline).sort((a, b) => a - b);
 
-        const stats = { scanned: uids.length, matchedMessages: 0, pdfCount: 0, zipCount: 0, skippedOfd: 0, parseFailures: 0 };
+        const stats = {
+          scanned: uids.length,
+          matchedMessages: 0,
+          pdfCount: 0,
+          zipCount: 0,
+          skippedOfd: 0,
+          parseFailures: 0,
+          sinceDate: sinceDate ? isoDay(sinceDate) : "",
+          mode: sinceDate ? "window" : "incremental",
+        };
         const items = [];
         const keyword = String(config.subjectKeyword || "").trim().toLowerCase();
 
         const candidates = [];
         if (uids.length > 0) {
-          for await (const message of client.fetch(uids, { uid: true, envelope: true, bodyStructure: true, size: true }, { uid: true })) {
+          for await (const message of client.fetch(uids, { uid: true, envelope: true, bodyStructure: true, size: true, internalDate: true }, { uid: true })) {
             const subject = message.envelope?.subject || "";
             if (keyword && !subject.toLowerCase().includes(keyword)) continue;
             if (Number(message.size || 0) > MAX_MESSAGE_BYTES) continue;
+            // 兜底：个别服务器对 SEARCH SINCE 的实现不严格，这里再按邮件时间过滤一次
+            const messageDate = message.internalDate || message.envelope?.date || null;
+            if (sinceDate && messageDate && new Date(messageDate) < sinceDate) continue;
             if (!hasCandidateAttachment(message.bodyStructure)) continue;
-            candidates.push({ uid: message.uid, subject });
+            candidates.push({ uid: message.uid, subject, messageDate });
           }
         }
         stats.matchedMessages = candidates.length;
@@ -240,8 +254,9 @@ export async function syncMailbox({ state, onProgress = () => {}, parsePdfFile }
           const mail = await simpleParser(full.source);
           const subject = mail.subject || candidate.subject || "";
           if (keyword && !subject.toLowerCase().includes(keyword)) continue;
+          const sourceDate = toIsoString(mail.date || candidate.messageDate);
           for (const attachment of mail.attachments || []) {
-            await collectAttachment({ attachment, uid: candidate.uid, subject, items, stats, tempRoot, parsePdfFile });
+            await collectAttachment({ attachment, uid: candidate.uid, subject, sourceDate, items, stats, tempRoot, parsePdfFile });
           }
         }
 
@@ -289,7 +304,7 @@ function isOfdAttachment(fileName, contentType) {
   return /\.ofd$/i.test(fileName) || contentType === "application/ofd";
 }
 
-async function collectAttachment({ attachment, uid, subject, items, stats, tempRoot, parsePdfFile }) {
+async function collectAttachment({ attachment, uid, subject, sourceDate, items, stats, tempRoot, parsePdfFile }) {
   const content = attachment.content;
   if (!content?.length || content.length > MAX_ATTACHMENT_BYTES) return;
   const fileName = String(attachment.filename || "").trim();
@@ -324,17 +339,17 @@ async function collectAttachment({ attachment, uid, subject, items, stats, tempR
         continue;
       }
       if (!entryData?.length || entryData.length > MAX_ATTACHMENT_BYTES) continue;
-      await addPdfItem({ data: entryData, fileName: entryName, uid, subject, items, stats, tempRoot, parsePdfFile, viaZip: fileName });
+      await addPdfItem({ data: entryData, fileName: entryName, uid, subject, sourceDate, items, stats, tempRoot, parsePdfFile, viaZip: fileName });
     }
     return;
   }
 
   if (isPdfAttachment(fileName, contentType)) {
-    await addPdfItem({ data: content, fileName, uid, subject, items, stats, tempRoot, parsePdfFile, viaZip: "" });
+    await addPdfItem({ data: content, fileName, uid, subject, sourceDate, items, stats, tempRoot, parsePdfFile, viaZip: "" });
   }
 }
 
-async function addPdfItem({ data, fileName, uid, subject, items, stats, tempRoot, parsePdfFile, viaZip }) {
+async function addPdfItem({ data, fileName, uid, subject, sourceDate, items, stats, tempRoot, parsePdfFile, viaZip }) {
   stats.pdfCount += 1;
   const safeName = sanitizeFileName(fileName, `发票_${uid}_${stats.pdfCount}.pdf`);
   const tempPath = path.join(tempRoot, `${uid}_${items.length}_${safeName}`);
@@ -358,8 +373,23 @@ async function addPdfItem({ data, fileName, uid, subject, items, stats, tempRoot
     invoiceDate: parsed?.invoiceDate || "",
     pageCount: parsed?.pageCount || 1,
     subject,
+    sourceDate: sourceDate || "",
     viaZip: viaZip || "",
   });
+}
+
+function isoDay(date) {
+  const value = new Date(date);
+  if (Number.isNaN(value.getTime())) return "";
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${value.getFullYear()}-${month}-${day}`;
+}
+
+function toIsoString(date) {
+  if (!date) return "";
+  const value = new Date(date);
+  return Number.isNaN(value.getTime()) ? "" : value.toISOString();
 }
 
 function sanitizeFileName(name, fallback) {
