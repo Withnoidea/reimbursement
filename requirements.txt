@@ -1,1 +1,9 @@
-PyMuPDF==1.28.0
+# 发票识别依赖。识别引擎统一用 RapidOCR（onnxruntime，纯 CPU），
+# PDF 由 pypdfium2 负责抽文字层和渲染位图。
+#
+# 打包分发用的自包含运行时由 npm run prepare:runtime 构建（tools/runtime/），
+# 这个文件只用于在开发机的 .venv 里装一套同样的依赖做调试。
+rapidocr==3.9.2
+onnxruntime
+pypdfium2
+opencv-python-headless

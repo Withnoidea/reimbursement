@@ -1,4 +1,9 @@
 import { openDB } from "idb";
+import {
+  DEFAULT_REIMBURSEMENT_STATUS,
+  normalizeReimbursementStatus,
+  todayDateValue,
+} from "./reimbursementStatus.js";
 
 const DB_NAME = "reimbursement-app";
 const DB_VERSION = 1;
@@ -45,6 +50,8 @@ export async function listReimbursements() {
   return reimbursements
     .map((item) => ({
       ...item,
+      status: normalizeReimbursementStatus(item.status),
+      receivedAt: normalizeReimbursementStatus(item.status) === "received" ? item.receivedAt || "" : "",
       documentCount: stats.get(item.id)?.count || 0,
       totalAmount: stats.get(item.id)?.total || 0,
     }))
@@ -53,12 +60,17 @@ export async function listReimbursements() {
 
 export async function createReimbursement(name, extras = {}) {
   const db = await getDb();
+  const status = normalizeReimbursementStatus(extras.status || DEFAULT_REIMBURSEMENT_STATUS);
+  const createdAt = new Date().toISOString();
   const item = {
     id: makeId("r"),
     name: name.trim(),
-    createdAt: new Date().toISOString(),
+    createdAt,
     periodStart: extras.periodStart || "",
     periodEnd: extras.periodEnd || "",
+    status,
+    receivedAt: status === "received" ? extras.receivedAt || todayDateValue() : "",
+    statusUpdatedAt: createdAt,
   };
   await db.add("reimbursements", item);
   return item;
@@ -68,7 +80,17 @@ export async function updateReimbursement(id, changes) {
   const db = await getDb();
   const item = await db.get("reimbursements", id);
   if (!item) return null;
-  const updated = { ...item, ...changes };
+  const previousStatus = normalizeReimbursementStatus(item.status);
+  const status = normalizeReimbursementStatus(changes.status ?? previousStatus);
+  const updated = {
+    ...item,
+    ...changes,
+    status,
+    receivedAt: status === "received" ? changes.receivedAt || item.receivedAt || todayDateValue() : "",
+  };
+  if (status !== previousStatus && !changes.statusUpdatedAt) {
+    updated.statusUpdatedAt = new Date().toISOString();
+  }
   await db.put("reimbursements", updated);
   return updated;
 }

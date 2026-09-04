@@ -5,17 +5,21 @@
   "type": "module",
   "main": "electron/main.js",
   "scripts": {
-    "postinstall": "node scripts/prepare-pdf-assets.mjs && node scripts/prepare-mail-deps.mjs",
+    "postinstall": "node scripts/prepare-pdf-assets.mjs && node scripts/prepare-mail-deps.mjs && node scripts/prepare-updater-deps.mjs",
     "start": "node scripts/start-desktop.mjs",
     "dev": "vite --host 127.0.0.1",
     "desktop": "electron .",
-    "build": "node scripts/prepare-pdf-assets.mjs && node scripts/prepare-mail-deps.mjs && vite build",
-    "package:win": "npm run build && electron-builder --win portable",
-    "package:win-folder": "npm run build && node scripts/package-win-folder.mjs",
+    "prepare:runtime": "node scripts/prepare-python-runtime.mjs",
+    "build:web": "node scripts/prepare-pdf-assets.mjs && node scripts/prepare-mail-deps.mjs && node scripts/prepare-updater-deps.mjs && vite build",
+    "build": "npm run build:web && npm run prepare:runtime && node scripts/package-win-folder.mjs",
+    "package:installer": "npm run build:web && npm run prepare:runtime && electron-builder --win nsis",
+    "package:win-folder": "npm run build:web && npm run prepare:runtime && node scripts/package-win-folder.mjs",
+    "release": "npm run package:installer -- --publish always",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
+    "electron-updater": "^6.8.9",
     "idb": "^8.0.3",
     "imapflow": "^1.4.7",
     "jszip": "^3.10.1",
@@ -37,28 +41,45 @@
     "directories": {
       "output": "dist-electron"
     },
+    "publish": {
+      "provider": "github",
+      "owner": "Withnoidea",
+      "repo": "reimbursement"
+    },
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "package.json"
+      "icon.ico",
+      "package.json",
+      "!node_modules/**"
     ],
     "extraResources": [
       {
         "from": "tools",
-        "to": "tools"
-      },
-      {
-        "from": ".venv",
-        "to": ".venv",
+        "to": "tools",
         "filter": [
-          "**/*"
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!_fixtures/**",
+          "!_old_parse_pdf.py"
         ]
       }
     ],
     "win": {
+      "icon": "icon.ico",
       "target": [
-        "portable"
+        "nsis"
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "报销单据管理",
+      "artifactName": "Reimbursement-${version}-Setup.${ext}"
     }
   }
 }

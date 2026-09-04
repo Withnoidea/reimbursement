@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
+  ArrowLeft,
+  ChevronRight,
   Download,
   Eye,
   FileText,
@@ -9,7 +11,6 @@ import {
   Home,
   Inbox,
   Mail,
-  MoreHorizontal,
   Pencil,
   Plus,
   ReceiptText,
@@ -39,6 +40,13 @@ import {
 } from "./storage.js";
 import { parsePdf } from "./pdfParser.js";
 import { exportDocumentsZip, formatBytes, formatDateTime, formatInvoiceDate, money } from "./exporter.js";
+import {
+  getReimbursementStatusMeta,
+  isReimbursementReceived,
+  normalizeReimbursementStatus,
+  REIMBURSEMENT_STATUSES,
+  todayDateValue,
+} from "./reimbursementStatus.js";
 
 const documentFieldLabels = {
   amount: "金额",
@@ -55,24 +63,17 @@ const documentFieldInputTypes = {
 };
 
 const themeOptions = [
-  { value: "mint", label: "薄荷办公", description: "松石绿侧栏配薄荷强调色，清爽耐看", colors: ["#0e3b32", "#14907f", "#e7f3ef"] },
-  { value: "porcelain", label: "瓷白蓝灰", description: "蓝灰侧栏配冷蓝强调色，安静克制", colors: ["#3a4a63", "#3b6ea5", "#e9f0f8"] },
-  { value: "lake", label: "湖光青蓝", description: "深海蓝侧栏配湖蓝高亮，通透明快", colors: ["#10394e", "#0e8aa8", "#e3f3f7"] },
-  { value: "ember", label: "暖棕票据", description: "暖棕侧栏配琥珀强调色，适合财务归档感", colors: ["#45301f", "#c05621", "#faeee3"] },
-  { value: "sakura", label: "樱粉映白", description: "深酒红侧栏配樱粉高亮，柔和有辨识度", colors: ["#542a3d", "#d4547a", "#fbeaf0"] },
-  { value: "violet", label: "紫藤专业", description: "深紫侧栏配紫罗兰强调色，沉稳专业", colors: ["#33265a", "#7451c2", "#efeafa"] },
-  { value: "graphite", label: "鎏金石墨", description: "石墨黑侧栏配鎏金强调色，低调轻奢", colors: ["#1b1c1e", "#a0762e", "#f5eedf"] },
-  { value: "aurora", label: "极光深色", description: "深夜蓝背景配极光青高亮，适合夜间处理单据", colors: ["#060b16", "#23c3a4", "#0b1220"] },
-  { value: "midnight", label: "午夜靛蓝", description: "墨蓝深色背景配靛蓝紫高亮，夜间更护眼", colors: ["#080a1a", "#8b93f8", "#0e1126"] },
+  { value: "ledger", label: "账册蓝", description: "冷白票据纸与沉静账册蓝，适合长时间整理", colors: ["#e8eef0", "#2d6470", "#f3f6f7"] },
+  { value: "paper", label: "纸墨灰", description: "中性纸面与松烟灰，减少颜色干扰", colors: ["#e9ebe7", "#53675d", "#f4f5f2"] },
+  { value: "night", label: "夜间账台", description: "深墨底色与低饱和青色，适合夜间核对", colors: ["#0a1013", "#73b9aa", "#11191d"] },
 ];
 
 function getInitialTheme() {
   const saved = localStorage.getItem("reimbursement-theme");
-  return themeOptions.some((option) => option.value === saved) ? saved : "mint";
+  return themeOptions.some((option) => option.value === saved) ? saved : "ledger";
 }
 
 export default function App() {
-  const fileInputRef = useRef(null);
   const mailSyncingRef = useRef(false);
   const [reimbursements, setReimbursements] = useState([]);
   const [documents, setDocuments] = useState([]);
@@ -83,13 +84,15 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [dialog, setDialog] = useState(null);
   const [preview, setPreview] = useState(null);
-  const [dragging, setDragging] = useState(false);
   const [sortConfig, setSortConfig] = useState({ field: "uploadedAt", direction: "desc" });
   const [theme, setTheme] = useState(getInitialTheme);
   const [view, setView] = useState("home");
+  const [reimbursementFilter, setReimbursementFilter] = useState("all");
   const [inboxDocs, setInboxDocs] = useState([]);
   const [inboxSelectedIds, setInboxSelectedIds] = useState(new Set());
   const [allDocs, setAllDocs] = useState([]);
+  const [updateState, setUpdateState] = useState(null);
+  const [updateCheckRequested, setUpdateCheckRequested] = useState(0);
 
   const active = reimbursements.find((item) => item.id === activeId) || null;
   const canMailSync = Boolean(window.desktopApi?.syncMailbox);
@@ -123,6 +126,10 @@ export default function App() {
       if (action === "new-reimbursement") {
         setDialog({ type: "reimbursement", mode: "create" });
       }
+      if (action === "check-updates") {
+        setDialog({ type: "preferences" });
+        setUpdateCheckRequested((n) => n + 1);
+      }
     });
   }, []);
 
@@ -132,6 +139,16 @@ export default function App() {
       if (mailSyncingRef.current) setBusy(text || "正在同步邮箱…");
     });
   }, []);
+
+  useEffect(() => {
+    if (!window.desktopApi?.onUpdaterState) return undefined;
+    return window.desktopApi.onUpdaterState((next) => setUpdateState(next || null));
+  }, []);
+
+  useEffect(() => {
+    if (updateState?.status !== "downloaded") return;
+    setDialog((current) => (current ? current : { type: "updateReady", version: updateState.version }));
+  }, [updateState?.status, updateState?.version]);
 
   useEffect(() => {
     if (activeId) refreshDocuments(activeId);
@@ -151,6 +168,16 @@ export default function App() {
 
   function openPreferences() {
     setDialog({ type: "preferences" });
+  }
+
+  function openReimbursements(status = "all") {
+    setReimbursementFilter(status);
+    setView("reimbursements");
+  }
+
+  function openReimbursement(id) {
+    setActiveId(id);
+    setView("reimbursement");
   }
 
   async function refreshReimbursements(preferredId) {
@@ -175,18 +202,31 @@ export default function App() {
     const name = String(values.name || "").trim();
     if (!name) return;
     let { periodStart = "", periodEnd = "" } = values;
+    const status = normalizeReimbursementStatus(values.status);
+    const receivedAt = status === "received" ? values.receivedAt || todayDateValue() : "";
     if (periodStart && periodEnd && periodStart > periodEnd) {
       [periodStart, periodEnd] = [periodEnd, periodStart];
     }
     if (mode === "rename" && active) {
-      await updateReimbursement(active.id, { name, periodStart, periodEnd });
+      await updateReimbursement(active.id, { name, periodStart, periodEnd, status, receivedAt });
       await refreshReimbursements(active.id);
     } else {
-      const item = await createReimbursement(name, { periodStart, periodEnd });
+      const item = await createReimbursement(name, { periodStart, periodEnd, status, receivedAt });
       await refreshReimbursements(item.id);
       setView("reimbursement");
     }
     setDialog(null);
+    setToast(status === "received" ? "报销已保存并计入到账统计" : "报销信息已保存");
+  }
+
+  async function handleReimbursementStatusChange(target, nextStatus) {
+    if (!target) return;
+    const status = normalizeReimbursementStatus(nextStatus);
+    const receivedAt = status === "received" ? target.receivedAt || todayDateValue() : "";
+    await updateReimbursement(target.id, { status, receivedAt });
+    await refreshReimbursements(target.id);
+    const statusMeta = getReimbursementStatusMeta(status);
+    setToast(status === "received" ? `“${target.name}”已标记到账并计入统计` : `“${target.name}”已更新为${statusMeta.label}`);
   }
 
   async function handleDeleteReimbursement(target = active) {
@@ -199,35 +239,33 @@ export default function App() {
       onConfirm: async () => {
         await deleteReimbursement(target.id);
         await refreshReimbursements("");
+        if (target.id === activeId) openReimbursements();
         setDialog(null);
         setToast("已删除报销");
       },
     });
   }
 
-  async function handleFiles(files) {
-    if (!active) {
-      setToast("请先创建或选择一个报销");
+  // target 为报销对象时直接归入该报销；为 null 时落进发票箱，之后由发票箱分配。
+  async function handleFiles(files, target) {
+    const accepted = [...files].filter((file) => getFileKind(file) !== "");
+    if (accepted.length === 0) {
+      setToast("请选择 PDF 或图片单据");
       return;
     }
 
-    const pdfs = [...files].filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
-    if (pdfs.length === 0) {
-      setToast("请选择 PDF 文件");
-      return;
-    }
-
-    setBusy(`正在识别 ${pdfs.length} 个 PDF`);
+    setBusy(`正在识别 ${accepted.length} 个单据`);
     const failures = [];
     let outOfPeriod = 0;
-    for (const file of pdfs) {
+    for (const file of accepted) {
       try {
         const parsed = await parseWithBestAvailableParser(file);
-        if (isOutsidePeriod(active, parsed.invoiceDate)) outOfPeriod += 1;
+        if (target && isOutsidePeriod(target, parsed.invoiceDate)) outOfPeriod += 1;
         await addDocument({
           id: makeId("d"),
-          reimbursementId: active.id,
+          reimbursementId: target ? target.id : INBOX_ID,
           name: file.name,
+          fileType: getFileKind(file),
           amount: parsed.amount,
           invoiceNo: parsed.invoiceNo,
           invoiceDate: parsed.invoiceDate,
@@ -243,17 +281,30 @@ export default function App() {
       }
     }
     setBusy("");
-    await refreshDocuments(active.id);
-    await refreshReimbursements(active.id);
-    const periodWarning = outOfPeriod > 0 ? `，注意：${outOfPeriod} 张开票日期不在报销周期内` : "";
-    setToast(failures.length > 0 ? `部分文件失败：${failures.join("；")}` : `已导入 ${pdfs.length} 个 PDF${periodWarning}`);
+    if (target) {
+      await refreshDocuments(target.id);
+      await refreshReimbursements(target.id);
+    } else {
+      await refreshInbox();
+    }
+
+    if (failures.length > 0) {
+      setToast(`部分文件失败：${failures.join("；")}`);
+      return;
+    }
+    if (target) {
+      const periodWarning = outOfPeriod > 0 ? `，注意：${outOfPeriod} 张开票日期不在报销周期内` : "";
+      setToast(`已导入 ${accepted.length} 个单据${periodWarning}`);
+    } else {
+      setToast(`已导入 ${accepted.length} 个单据到发票箱，可在发票箱分配到报销`);
+    }
   }
 
   async function handleEditField(doc, field) {
     setDialog({ type: "documentField", field, doc, value: getDocumentFieldEditValue(doc, field) });
   }
 
-  async function handleMailSync({ full = false } = {}) {
+  async function handleMailSync({ full = false, startTime = "", endTime = "" } = {}) {
     if (!canMailSync || busy) return;
 
     const config = await window.desktopApi.loadMailConfig();
@@ -264,8 +315,9 @@ export default function App() {
     }
 
     const stateKey = `mail-sync-state:${config.user}@${config.host}/${config.folder}`;
+    const hasCustomRange = Boolean(startTime && endTime);
     let syncState = null;
-    if (!full) {
+    if (!full && !hasCustomRange) {
       try {
         syncState = JSON.parse(localStorage.getItem(stateKey) || "null");
       } catch {
@@ -274,9 +326,12 @@ export default function App() {
     }
 
     mailSyncingRef.current = true;
-    setBusy(full ? "正在重新拉取全部邮件…" : "正在连接邮箱…");
+    setBusy(hasCustomRange ? "正在按指定时间段同步邮箱…" : full ? "正在重新拉取全部邮件…" : "正在连接邮箱…");
     try {
-      const result = await window.desktopApi.syncMailbox({ state: syncState });
+      const result = await window.desktopApi.syncMailbox({
+        state: syncState,
+        range: hasCustomRange ? { startTime, endTime } : null,
+      });
       if (!result?.ok) {
         if (result?.needsConfig) setDialog({ type: "mailSettings" });
         setToast(`同步失败：${result?.error || "未知错误"}`);
@@ -287,12 +342,19 @@ export default function App() {
       const known = collectKnownInvoiceNos(allDocs);
       const knownHashes = await collectKnownFileHashes(allDocs);
       let added = 0;
-      let duplicated = 0;
+      const duplicates = [];
       for (const item of result.items) {
         const invoiceNo = String(item.invoiceNo || "").trim();
         const fileHash = item.fileHash || "";
-        if ((invoiceNo && known.has(invoiceNo)) || (fileHash && knownHashes.has(fileHash))) {
-          duplicated += 1;
+        const existing = allDocs.find((doc) =>
+          (invoiceNo && doc.invoiceNo === invoiceNo) || (fileHash && doc.fileHash === fileHash)
+        );
+        if (existing) {
+          const target = reimbursements.find((r) => r.id === existing.reimbursementId);
+          duplicates.push({
+            name: item.fileName,
+            location: target ? target.name : "发票箱",
+          });
           continue;
         }
         if (invoiceNo) known.add(invoiceNo);
@@ -308,7 +370,8 @@ export default function App() {
           pageCount: item.pageCount || 1,
           size: item.size || 0,
           uploadedAt: new Date().toISOString(),
-          fileBlob: new Blob([item.data], { type: "application/pdf" }),
+          fileType: item.mimeType && item.mimeType.startsWith("image/") ? "image" : "pdf",
+          fileBlob: new Blob([item.data], { type: item.mimeType || "application/pdf" }),
           fileHash: fileHash || null,
           sourceSubject: item.subject || "",
           sourceDate: item.sourceDate || "",
@@ -316,19 +379,41 @@ export default function App() {
         added += 1;
       }
 
-      localStorage.setItem(stateKey, JSON.stringify(result.newState));
+      if (result.newState && result.stats.mode !== "custom") {
+        localStorage.setItem(stateKey, JSON.stringify(result.newState));
+      }
       await refreshInbox();
       setView("inbox");
 
-      const rangeText = result.stats.sinceDate
-        ? `扫描 ${result.stats.scanned} 封邮件（${result.stats.sinceDate} 以来）`
-        : `扫描 ${result.stats.scanned} 封上次同步后的新邮件`;
+      const rangeText = result.stats.mode === "custom"
+        ? `扫描 ${result.stats.scanned} 封邮件（${formatSyncRange(result.stats.startTime, result.stats.endTime)}）`
+        : result.stats.sinceDate
+          ? `扫描 ${result.stats.scanned} 封邮件（${result.stats.sinceDate} 以来）`
+          : `扫描 ${result.stats.scanned} 封上次同步后的新邮件`;
       const parts = [rangeText];
+      if (result.stats.mode === "incremental" && result.stats.rechecked > 0) {
+        parts.push(`复查最近 ${result.stats.rechecked} 封邮件`);
+      }
       if (added > 0) parts.push(`新收 ${added} 张发票待分配`);
-      if (duplicated > 0) parts.push(`跳过重复 ${duplicated} 张`);
+      if (duplicates.length > 0) {
+        const summary = duplicates.slice(0, 3).map((dup) => `${dup.name}（已在${dup.location}）`).join("、");
+        const more = duplicates.length > 3 ? `等 ${duplicates.length} 张` : "";
+        parts.push(`跳过重复：${summary}${more}`);
+      }
       if (result.stats.skippedOfd > 0) parts.push(`${result.stats.skippedOfd} 个 OFD 文件暂不支持`);
+      if (result.stats.skippedInlineImages > 0) parts.push(`忽略 ${result.stats.skippedInlineImages} 个正文内嵌图片`);
+      if (result.stats.filteredBySubject > 0) parts.push(`${result.stats.filteredBySubject} 封邮件未匹配主题关键词`);
+      if (result.stats.oversizedMessages > 0) parts.push(`${result.stats.oversizedMessages} 封邮件超过 60MB 未处理`);
+      if (result.stats.oversizedAttachments > 0) parts.push(`${result.stats.oversizedAttachments} 个附件超过 30MB 未导入`);
+      if (result.stats.invalidZipCount > 0) parts.push(`${result.stats.invalidZipCount} 个 ZIP 无法解压`);
       if (result.stats.parseFailures > 0) parts.push(`${result.stats.parseFailures} 张未识别出信息`);
-      if (added === 0 && duplicated === 0) parts.push("没有发现新发票");
+      if (added === 0 && duplicated === 0) {
+        if (result.stats.messagesWithAttachments > 0 && result.stats.pdfCount === 0 && result.stats.imageCount === 0) {
+          parts.push(`${result.stats.messagesWithAttachments} 封邮件含附件，但没有可导入的发票`);
+        } else {
+          parts.push("没有发现新发票");
+        }
+      }
       setToast(`同步完成：${parts.join("，")}`);
     } catch (error) {
       setToast(`同步失败：${error.message}`);
@@ -349,7 +434,7 @@ export default function App() {
 
   async function handleMergeDocuments() {
     if (!active || selectedDocs.length < 2) return;
-    const firstName = selectedDocs[0]?.name?.replace(/\.pdf$/i, "") || "合并单据";
+    const firstName = selectedDocs[0]?.name?.replace(/\.(pdf|png|jpe?g)$/i, "") || "合并单据";
     setDialog({
       type: "merge",
       docs: selectedDocs,
@@ -445,6 +530,47 @@ export default function App() {
     }
     await exportDocumentsZip(active, docs);
     setToast(`已生成 ${docs.length} 张单据的压缩包`);
+  }
+
+  async function handleReparseDocuments(targetDocs, refreshScope = "reimbursement") {
+    const docs = targetDocs.filter((doc) => doc.fileBlob && !doc.mergedItems?.length);
+    if (docs.length === 0) {
+      setToast("没有可重新识别的原始文件");
+      return;
+    }
+
+    setBusy(`正在重新识别 ${docs.length} 张单据`);
+    let success = 0;
+    const failures = [];
+    for (const doc of docs) {
+      try {
+        const parsed = await parseStoredDocument(doc);
+        await updateDocument(doc.id, {
+          amount: parsed.amount,
+          invoiceNo: parsed.invoiceNo || "",
+          invoiceDate: parsed.invoiceDate || "",
+          pageCount: parsed.pageCount || doc.pageCount || 1,
+          reparsedAt: new Date().toISOString(),
+        });
+        success += 1;
+      } catch (error) {
+        failures.push(`${doc.name}: ${error.message}`);
+      }
+    }
+
+    setBusy("");
+    if (refreshScope === "inbox") {
+      await refreshInbox();
+    } else {
+      await refreshDocuments(activeId);
+    }
+    await refreshReimbursements(activeId);
+    if (view === "home") {
+      setAllDocs(await listAllDocuments());
+    }
+
+    const failedText = failures.length > 0 ? `，失败 ${failures.length} 张` : "";
+    setToast(`已重新识别 ${success} 张单据${failedText}`);
   }
 
   function openPreview(doc) {
@@ -553,7 +679,7 @@ export default function App() {
     setDialog({
       type: "confirm",
       title: "删除发票",
-      message: `确定删除待分配的 ${ids.length} 张发票吗？删除后可用「全部重新拉取」从邮箱找回。`,
+      message: `确定删除待分配的 ${ids.length} 张发票吗？删除后可用「指定时间段」从邮箱找回。`,
       actionLabel: "删除",
       onConfirm: async () => {
         await deleteDocuments(ids);
@@ -581,64 +707,45 @@ export default function App() {
             <WalletCards size={22} />
           </div>
           <div>
-            <div className="brandTitle">报销单据</div>
-            <div className="brandSub">本地桌面工作台</div>
+            <div className="brandTitle">报销台账</div>
+            <div className="brandSub">凭证与到账管理</div>
           </div>
         </div>
-
-        <button
-          className={`syncNavButton ${view === "home" ? "active" : ""}`}
-          onClick={() => setView("home")}
-        >
-          <span className="navIcon">
-            <Home size={18} />
-          </span>
-          <span className="navText">
-            <strong>首页</strong>
-            <em>数据总览与邮箱同步</em>
-          </span>
-          {inboxDocs.length > 0 && <span className="syncBadge">{inboxDocs.length}</span>}
-        </button>
 
         <button className="primaryButton full" onClick={() => setDialog({ type: "reimbursement", mode: "create" })}>
           <Plus size={17} />
           新建报销
         </button>
 
-        <div className="navList">
-          {reimbursements.map((item) => (
-            <div
-              key={item.id}
-              className={`navItem ${view === "reimbursement" && item.id === activeId ? "active" : ""}`}
-            >
-              <button
-                className="navSelect"
-                onClick={() => {
-                  setActiveId(item.id);
-                  setView("reimbursement");
-                }}
-              >
-                <span className="navIcon">
-                  <ReceiptText size={18} />
-                </span>
-                <span className="navText">
-                  <strong>{item.name}</strong>
-                  <em>{item.documentCount} 张 / {money(item.totalAmount)} 元</em>
-                  {formatPeriod(item) && <em>{formatPeriod(item)}</em>}
-                </span>
-              </button>
-              <button
-                className="navDelete"
-                title="删除报销"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  handleDeleteReimbursement(item);
-                }}
-              >
-                <Trash2 size={16} />
-              </button>
-            </div>
-          ))}
+        <nav className="primaryNav" aria-label="主要导航">
+          <button className={`primaryNavItem ${view === "home" ? "active" : ""}`} onClick={() => setView("home")}>
+            <span className="navIcon"><Home size={18} /></span>
+            <span><strong>总览</strong><em>资金进度与待办</em></span>
+          </button>
+          <button
+            className={`primaryNavItem ${view === "reimbursements" || view === "reimbursement" ? "active" : ""}`}
+            onClick={() => openReimbursements()}
+          >
+            <span className="navIcon"><ReceiptText size={18} /></span>
+            <span><strong>报销记录</strong><em>{reimbursements.length} 个报销</em></span>
+            <span className="navCount">{reimbursements.length}</span>
+          </button>
+          <button className={`primaryNavItem ${view === "inbox" ? "active" : ""}`} onClick={() => setView("inbox")}>
+            <span className="navIcon"><Inbox size={18} /></span>
+            <span><strong>发票箱</strong><em>上传、同步与待分配</em></span>
+            {inboxDocs.length > 0 && <span className="navCount attention">{inboxDocs.length}</span>}
+          </button>
+        </nav>
+
+        <div className="sidebarFooter">
+          <div className="localStoreNote">
+            <span><i /> 本机存储</span>
+            <em>数据只保存在这台设备</em>
+          </div>
+          <button className="sidebarSettings" onClick={openPreferences}>
+            <Settings size={17} />
+            外观与设置
+          </button>
         </div>
       </aside>
 
@@ -650,14 +757,21 @@ export default function App() {
             inboxCount={inboxDocs.length}
             busy={busy}
             canMailSync={canMailSync}
-            onSync={() => handleMailSync()}
-            onFullSync={() => handleMailSync({ full: true })}
-            onOpenSettings={() => setDialog({ type: "mailSettings" })}
+            onSync={() => setDialog({ type: "mailSync", initialMode: "incremental" })}
             onOpenInbox={() => setView("inbox")}
-            onOpenReimbursement={(id) => {
-              setActiveId(id);
-              setView("reimbursement");
-            }}
+            onOpenReimbursements={openReimbursements}
+            onOpenReimbursement={openReimbursement}
+            onUpload={(files) => handleFiles(files, null)}
+          />
+        ) : view === "reimbursements" ? (
+          <ReimbursementsWorkspace
+            reimbursements={reimbursements}
+            statusFilter={reimbursementFilter}
+            onStatusFilterChange={setReimbursementFilter}
+            onCreate={() => setDialog({ type: "reimbursement", mode: "create" })}
+            onOpen={openReimbursement}
+            onDelete={handleDeleteReimbursement}
+            onStatusChange={handleReimbursementStatusChange}
           />
         ) : view === "inbox" ? (
           <InboxWorkspace
@@ -667,26 +781,48 @@ export default function App() {
             hasPeriods={reimbursements.some((item) => item.periodStart || item.periodEnd)}
             onToggle={toggleInboxSelect}
             onToggleAll={toggleInboxSelectAll}
-            onSync={() => handleMailSync()}
-            onFullSync={() => handleMailSync({ full: true })}
+            onSync={() => setDialog({ type: "mailSync", initialMode: "incremental" })}
+            onFullSync={() => setDialog({ type: "mailSync", initialMode: "custom" })}
             onOpenSettings={() => setDialog({ type: "mailSettings" })}
             onMove={handleMoveInboxDocs}
             onAutoAssign={autoAssignInboxDocs}
             onDelete={handleDeleteInboxDocs}
             onPreview={openPreview}
+            onReparse={(docs) => handleReparseDocuments(docs, "inbox")}
+            onUpload={(files) => handleFiles(files, null)}
           />
         ) : (
           <>
         <header className="topbar">
           <div>
-            <h1>{active?.name || "创建一个报销"}</h1>
+            <button type="button" className="breadcrumbButton" onClick={() => openReimbursements()}>
+              <ArrowLeft size={15} />
+              报销记录
+            </button>
+            <div className="pageTitleLine">
+              <h1>{active?.name || "创建一个报销"}</h1>
+              {active && <ReimbursementStatusBadge item={active} />}
+            </div>
             <p>
               {active
-                ? `${documents.length} 张单据，合计 ${money(total)} 元${formatPeriod(active) ? ` · 周期 ${formatPeriod(active)}` : ""}`
-                : "先创建报销，再上传 PDF 单据"}
+                ? `${documents.length} 张单据，合计 ${money(total)} 元${formatPeriod(active) ? ` · 周期 ${formatPeriod(active)}` : ""}${isReimbursementReceived(active) && active.receivedAt ? ` · ${formatReceivedDate(active.receivedAt)}到账` : ""}`
+                : "先创建报销，再上传 PDF 或图片单据"}
             </p>
           </div>
           <div className="topActions">
+            {active && (
+              <label className="statusQuickControl">
+                <span>报销状态</span>
+                <select
+                  value={normalizeReimbursementStatus(active.status)}
+                  onChange={(event) => handleReimbursementStatusChange(active, event.target.value)}
+                >
+                  {REIMBURSEMENT_STATUSES.map((status) => (
+                    <option key={status.value} value={status.value}>{status.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <button className="ghostButton" disabled={!active} onClick={() => setDialog({ type: "reimbursement", mode: "rename" })}>
               <Pencil size={17} />
               编辑
@@ -698,45 +834,11 @@ export default function App() {
           </div>
         </header>
 
-        <section
-          className={`uploadBand ${dragging ? "dragging" : ""}`}
-          onDragEnter={(event) => {
-            event.preventDefault();
-            setDragging(true);
-          }}
-          onDragOver={(event) => event.preventDefault()}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(event) => {
-            event.preventDefault();
-            setDragging(false);
-            handleFiles(event.dataTransfer.files);
-          }}
-        >
-          <div className="uploadCopy">
-            <Upload size={22} />
-            <div>
-              <strong>上传 PDF 单据</strong>
-              <span>自动识别金额、发票号码和开票日期</span>
-            </div>
-          </div>
-          <div className="uploadActions">
-            <button className="primaryButton" disabled={!active || Boolean(busy)} onClick={() => fileInputRef.current?.click()}>
-              <FolderOpen size={17} />
-              选择文件
-            </button>
-          </div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="application/pdf,.pdf"
-            multiple
-            hidden
-            onChange={(event) => {
-              handleFiles(event.target.files);
-              event.target.value = "";
-            }}
-          />
-        </section>
+        <UploadBand
+          busy={busy}
+          hint="自动识别金额、发票号码和开票日期，扫描件和照片走 OCR"
+          onFiles={(files) => handleFiles(files, active)}
+        />
 
         <div className="contentGrid">
           <section className="panel documentPanel">
@@ -757,6 +859,14 @@ export default function App() {
                 <button className="ghostButton" disabled={selectedIds.size < 2} onClick={handleMergeDocuments}>
                   <Archive size={17} />
                   合并
+                </button>
+                <button
+                  className="ghostButton"
+                  disabled={selectedIds.size === 0 || Boolean(busy)}
+                  onClick={() => handleReparseDocuments(selectedDocs)}
+                >
+                  <RefreshCw size={17} />
+                  重新识别
                 </button>
                 <button className="ghostButton" disabled={documents.length === 0} onClick={() => handleExport("all")}>
                   <Download size={17} />
@@ -854,6 +964,13 @@ export default function App() {
                           {doc.mergedItems?.length > 0 && (
                             <button title="解除合并" onClick={() => handleUnmergeDocument(doc)}><Ungroup size={16} /></button>
                           )}
+                          <button
+                            title="重新识别"
+                            disabled={!doc.fileBlob || Boolean(busy)}
+                            onClick={() => handleReparseDocuments([doc])}
+                          >
+                            <RefreshCw size={16} />
+                          </button>
                           <button title="修改" onClick={() => handleEditField(doc, "amount")}><Pencil size={16} /></button>
                         </div>
                       </td>
@@ -866,7 +983,7 @@ export default function App() {
                 <div className="emptyState">
                   <FileText size={32} />
                   <strong>{documents.length === 0 ? "还没有单据" : "没有匹配的单据"}</strong>
-                  <span>{documents.length === 0 ? "上传 PDF 后会出现在这里" : "换一个关键词试试"}</span>
+                  <span>{documents.length === 0 ? "上传单据后会出现在这里" : "换一个关键词试试"}</span>
                 </div>
               )}
             </div>
@@ -875,7 +992,7 @@ export default function App() {
           <aside className="panel summaryPanel">
             <div className="summaryHeader">
               <span>当前报销</span>
-              <MoreHorizontal size={18} />
+              {active && <ReimbursementStatusBadge item={active} compact />}
             </div>
             <div className="metric big">
               <label>合计金额</label>
@@ -895,6 +1012,13 @@ export default function App() {
                 <strong>¥{money(selectedTotal)}</strong>
               </div>
             </div>
+            {active && (
+              <div className={`settlementSummary ${isReimbursementReceived(active) ? "received" : "pending"}`}>
+                <label>{isReimbursementReceived(active) ? "到账记录" : "到账统计"}</label>
+                <strong>{isReimbursementReceived(active) ? formatReceivedDate(active.receivedAt) || "已到账" : "尚未到账"}</strong>
+                <span>{isReimbursementReceived(active) ? "该笔金额已纳入首页到账统计" : "状态改为“已到账”后自动计入首页统计"}</span>
+              </div>
+            )}
             {selectedDocs.length > 0 && (
               <div className="selectedList">
                 <label>已选单据</label>
@@ -931,12 +1055,30 @@ export default function App() {
           canMailSync={canMailSync}
           onOpenMailSettings={() => setDialog({ type: "mailSettings" })}
           onClose={() => setDialog(null)}
+          updateState={updateState}
+          updateCheckRequested={updateCheckRequested}
         />
       )}
       {dialog?.type === "mailSettings" && (
         <MailSettingsDialog
           onClose={() => setDialog(null)}
           onSaved={() => setToast("邮箱设置已保存")}
+        />
+      )}
+      {dialog?.type === "mailSync" && (
+        <MailSyncDialog
+          initialMode={dialog.initialMode}
+          onClose={() => setDialog(null)}
+          onSync={(options) => {
+            setDialog(null);
+            handleMailSync(options);
+          }}
+        />
+      )}
+      {dialog?.type === "updateReady" && (
+        <UpdateReadyDialog
+          version={dialog.version}
+          onClose={() => setDialog(null)}
         />
       )}
       {dialog?.type === "reimbursement" && (
@@ -956,7 +1098,7 @@ export default function App() {
           onMove={(target) => moveDocumentsTo(dialog.docs, target)}
         />
       )}
-      {dialog && !["preferences", "mailSettings", "moveDocuments", "reimbursement"].includes(dialog.type) && (
+      {dialog && !["preferences", "mailSettings", "mailSync", "moveDocuments", "reimbursement"].includes(dialog.type) && (
         <EditDialog
           dialog={dialog}
           onClose={() => setDialog(null)}
@@ -971,6 +1113,65 @@ export default function App() {
   );
 }
 
+// 返回 "pdf" | "image" | ""（不支持的类型）
+const UPLOAD_ACCEPT = "application/pdf,.pdf,image/png,image/jpeg,.png,.jpg,.jpeg";
+
+// 三处上传入口共用：报销详情页、发票箱、总览空状态。拖拽状态各自独立。
+function UploadBand({ busy, hint, onFiles, compact = false }) {
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef(null);
+
+  return (
+    <section
+      className={`uploadBand ${compact ? "uploadBandCompact" : ""} ${dragging ? "dragging" : ""}`}
+      onDragEnter={(event) => {
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDragOver={(event) => event.preventDefault()}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(event) => {
+        event.preventDefault();
+        setDragging(false);
+        onFiles(event.dataTransfer.files);
+      }}
+    >
+      <div className="uploadCopy">
+        <Upload size={22} aria-hidden="true" />
+        <div>
+          <strong>上传 PDF 或图片单据</strong>
+          <span>{hint}</span>
+        </div>
+      </div>
+      <div className="uploadActions">
+        <button className="primaryButton" disabled={Boolean(busy)} onClick={() => inputRef.current?.click()}>
+          <FolderOpen size={17} aria-hidden="true" />
+          选择文件
+        </button>
+      </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept={UPLOAD_ACCEPT}
+        multiple
+        hidden
+        onChange={(event) => {
+          onFiles(event.target.files);
+          event.target.value = "";
+        }}
+      />
+    </section>
+  );
+}
+
+function getFileKind(file) {
+  const name = String(file?.name || "").toLowerCase();
+  const type = String(file?.type || "").toLowerCase();
+  if (type === "application/pdf" || name.endsWith(".pdf")) return "pdf";
+  if (type === "image/png" || type === "image/jpeg" || /\.(png|jpe?g)$/.test(name)) return "image";
+  return "";
+}
+
 async function parseWithBestAvailableParser(file) {
   if (window.desktopApi) {
     try {
@@ -980,16 +1181,52 @@ async function parseWithBestAvailableParser(file) {
       console.warn("Native PDF parser failed, falling back to PDF.js.", error);
     }
   }
+  // 图片识别依赖桌面端的 OCR，浏览器里没有 desktopApi 时只能先入库、之后再识别。
+  if (getFileKind(file) === "image") {
+    return { amount: null, invoiceNo: "", invoiceDate: "", pageCount: 1 };
+  }
   return parsePdf(file);
+}
+
+async function parseStoredDocument(doc) {
+  if (!doc.fileBlob) throw new Error("缺少原始文件");
+  if (window.desktopApi?.parsePdfData) {
+    const data = await doc.fileBlob.arrayBuffer();
+    return window.desktopApi.parsePdfData(data, doc.name || "document.pdf");
+  }
+  if (doc.fileType === "image") throw new Error("图片识别需要在桌面端进行");
+  return parsePdf(doc.fileBlob);
+}
+
+function ReimbursementStatusBadge({ item, compact = false }) {
+  const status = normalizeReimbursementStatus(item?.status);
+  const meta = getReimbursementStatusMeta(status);
+  const receivedText = status === "received" && item?.receivedAt ? ` · ${formatReceivedDate(item.receivedAt)}到账` : "";
+  return (
+    <span
+      className={`statusBadge ${compact ? "compact" : ""}`}
+      data-status={status}
+      title={`${meta.description}${receivedText}`}
+    >
+      <span className="statusDot" aria-hidden="true" />
+      {meta.label}
+    </span>
+  );
 }
 
 function SortableTh({ field, sortConfig, onSort, className = "", children }) {
   const active = sortConfig.field === field;
+  const nextDirection = active && sortConfig.direction === "asc" ? "降序" : "升序";
   return (
-    <th className={className}>
-      <button type="button" className={`sortHeader ${active ? "active" : ""}`} onClick={() => onSort(field)}>
+    <th className={className} aria-sort={active ? (sortConfig.direction === "asc" ? "ascending" : "descending") : "none"}>
+      <button
+        type="button"
+        className={`sortHeader ${active ? "active" : ""}`}
+        title={`按${children}${nextDirection}排序`}
+        onClick={() => onSort(field)}
+      >
         <span>{children}</span>
-        <em>{active ? (sortConfig.direction === "asc" ? "↑" : "↓") : "↕"}</em>
+        <em aria-hidden="true">{active ? (sortConfig.direction === "asc" ? "↑" : "↓") : "↕"}</em>
       </button>
     </th>
   );
@@ -1097,6 +1334,13 @@ function formatPeriod(item) {
   return `${start || "…"} ~ ${end || "…"}`;
 }
 
+function formatReceivedDate(value) {
+  const text = String(value || "").trim();
+  const matched = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!matched) return text;
+  return `${Number(matched[2])}月${Number(matched[3])}日`;
+}
+
 // 有周期且日期可解析时才判断；日期为空/无周期一律视为不越界
 function isOutsidePeriod(item, invoiceDate) {
   if (!item || (!item.periodStart && !item.periodEnd)) return false;
@@ -1182,18 +1426,65 @@ function getDocumentFieldChange(field, value) {
   return null;
 }
 
-function PreferencesDialog({ theme, onThemeChange, canMailSync, onOpenMailSettings, onClose }) {
+function PreferencesDialog({ theme, onThemeChange, canMailSync, onOpenMailSettings, onClose, updateState, updateCheckRequested }) {
+  const [version, setVersion] = useState("");
+  const [autoCheck, setAutoCheck] = useState(true);
+  const [checking, setChecking] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+
+  useEffect(() => {
+    if (window.desktopApi?.updaterVersion) {
+      window.desktopApi.updaterVersion().then(setVersion).catch(() => {});
+    }
+    if (window.desktopApi?.updaterSettingsLoad) {
+      window.desktopApi.updaterSettingsLoad().then((settings) => {
+        setAutoCheck(settings?.autoCheck !== false);
+      }).catch(() => {});
+    }
+  }, []);
+
+  function handleAutoCheckChange(next) {
+    setAutoCheck(next);
+    if (window.desktopApi?.updaterSettingsSave) {
+      window.desktopApi.updaterSettingsSave({ autoCheck: next }).catch(() => {});
+    }
+  }
+
+  async function handleCheckNow() {
+    if (!window.desktopApi?.updaterCheck || checking) return;
+    setChecking(true);
+    setFeedback(null);
+    try {
+      await window.desktopApi.updaterCheck();
+    } catch (error) {
+      setFeedback({ kind: "error", text: `检查更新失败：${error?.message || "网络不可用"}` });
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  // 菜单「帮助 → 检查更新」打开偏好设置时自动触发一次检查。
+  const checkRequestRef = useRef(0);
+  useEffect(() => {
+    if (!updateCheckRequested || updateCheckRequested === checkRequestRef.current) return;
+    checkRequestRef.current = updateCheckRequested;
+    handleCheckNow();
+  }, [updateCheckRequested]);
+
+  const status = updateState?.status;
+  const downloading = status === "checking" || status === "downloading" || checking;
+
   return (
     <div className="modalBackdrop">
       <div className="dialog preferencesDialog">
         <div className="dialogHeader">
-          <strong>偏好设置</strong>
+          <strong>外观与设置</strong>
           <button type="button" onClick={onClose}><X size={18} /></button>
         </div>
         <div className="preferenceSection">
           <div>
-            <strong>外观主题</strong>
-            <span>选择应用界面的颜色风格</span>
+            <strong>界面主题</strong>
+            <span>三套主题共享同一套信息层级，只改变明暗与材质。</span>
           </div>
           <div className="themeOptions">
             {themeOptions.map((option) => (
@@ -1205,7 +1496,11 @@ function PreferencesDialog({ theme, onThemeChange, canMailSync, onOpenMailSettin
               >
                 <span
                   className="themeSwatch"
-                  style={{ background: `linear-gradient(135deg, ${option.colors[0]} 0 34%, ${option.colors[1]} 34% 67%, ${option.colors[2]} 67%)` }}
+                  style={{
+                    "--swatch-sidebar": option.colors[0],
+                    "--swatch-accent": option.colors[1],
+                    "--swatch-bg": option.colors[2],
+                  }}
                 />
                 <span>
                   <strong>{option.label}</strong>
@@ -1227,12 +1522,170 @@ function PreferencesDialog({ theme, onThemeChange, canMailSync, onOpenMailSettin
             </button>
           </div>
         )}
+        <div className="preferenceSection">
+          <div>
+            <strong>软件更新</strong>
+            <span>{version ? `当前版本 ${version}` : "检查新版本并自动安装"}</span>
+          </div>
+          <label className="updateAutoCheck">
+            <input
+              type="checkbox"
+              checked={autoCheck}
+              onChange={(event) => handleAutoCheckChange(event.target.checked)}
+            />
+            启动时自动检查更新
+          </label>
+          {status === "downloading" && (
+            <span className="updateProgress">正在下载新版本… {Number(updateState.percent || 0)}%</span>
+          )}
+          {status === "downloaded" ? (
+            <button
+              type="button"
+              className="primaryButton"
+              onClick={() => {
+                if (window.desktopApi?.updaterInstall) window.desktopApi.updaterInstall();
+              }}
+            >
+              <RefreshCw size={17} />
+              {updateState.version ? `重启并安装 v${updateState.version}` : "重启并安装"}
+            </button>
+          ) : (
+            <button type="button" className="ghostButton" disabled={downloading} onClick={handleCheckNow}>
+              <RefreshCw size={17} className={checking ? "spin" : ""} />
+              {downloading ? (status === "checking" || checking ? "正在检查…" : "正在下载…") : "检查更新"}
+            </button>
+          )}
+          {status === "none" && !downloading && <span className="updateHint">当前已是最新版本</span>}
+          {status === "available" && !downloading && (
+            <span className="updateHint">发现新版本 v{updateState.version}，正在后台下载…</span>
+          )}
+          {feedback && <span className={feedback.kind === "error" ? "updateHintError" : "updateHint"}>{feedback.text}</span>}
+        </div>
         <div className="dialogActions">
           <button type="button" className="primaryButton" onClick={onClose}>完成</button>
         </div>
       </div>
     </div>
   );
+}
+
+function UpdateReadyDialog({ version, onClose }) {
+  return (
+    <div className="modalBackdrop">
+      <div className="dialog">
+        <div className="dialogHeader">
+          <strong>更新已就绪</strong>
+          <button type="button" aria-label="关闭" onClick={onClose}><X size={18} /></button>
+        </div>
+        <p className="dialogMessage">
+          新版本{version ? ` v${version}` : ""}已下载完成。现在重启完成安装，或稍后退出应用时自动安装。
+        </p>
+        <div className="dialogActions">
+          <button type="button" className="ghostButton" onClick={onClose}>稍后</button>
+          <button
+            type="button"
+            className="primaryButton"
+            onClick={() => {
+              onClose();
+              if (window.desktopApi?.updaterInstall) window.desktopApi.updaterInstall();
+            }}
+          >
+            <RefreshCw size={17} />
+            立即重启安装
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MailSyncDialog({ initialMode = "incremental", onClose, onSync }) {
+  const [mode, setMode] = useState(initialMode);
+  const [range, setRange] = useState(() => createDefaultSyncRange(30));
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    window.desktopApi.loadMailConfig().then((config) => {
+      setRange(createDefaultSyncRange(Number(config?.days) || 30));
+    }).catch(() => {});
+  }, []);
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    if (mode === "incremental") {
+      onSync({});
+      return;
+    }
+    const start = new Date(range.startTime);
+    const end = new Date(range.endTime);
+    if (!range.startTime || !range.endTime || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      setError("请选择完整、有效的开始和结束时间");
+      return;
+    }
+    if (start >= end) {
+      setError("结束时间必须晚于开始时间");
+      return;
+    }
+    onSync({ startTime: start.toISOString(), endTime: end.toISOString() });
+  }
+
+  return (
+    <div className="modalBackdrop">
+      <form className="dialog mailSyncDialog" onSubmit={handleSubmit}>
+        <div className="dialogHeader">
+          <strong>同步邮箱</strong>
+          <button type="button" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="syncModeOptions">
+          <label className={`syncModeOption ${mode === "incremental" ? "active" : ""}`}>
+            <input type="radio" name="syncMode" checked={mode === "incremental"} onChange={() => { setMode("incremental"); setError(""); }} />
+            <span><strong>增量同步</strong><em>同步上次进度之后的新邮件，并复查最近邮件</em></span>
+          </label>
+          <label className={`syncModeOption ${mode === "custom" ? "active" : ""}`}>
+            <input type="radio" name="syncMode" checked={mode === "custom"} onChange={() => { setMode("custom"); setError(""); }} />
+            <span><strong>指定时间段</strong><em>按邮件接收时间重新扫描，已有发票会自动去重</em></span>
+          </label>
+        </div>
+        {mode === "custom" && (
+          <div className="mailForm syncRangeFields">
+            <label className="mailField">
+              <span>开始时间</span>
+              <input type="datetime-local" value={range.startTime} max={range.endTime} onChange={(event) => { setRange({ ...range, startTime: event.target.value }); setError(""); }} />
+            </label>
+            <label className="mailField">
+              <span>结束时间</span>
+              <input type="datetime-local" value={range.endTime} min={range.startTime} onChange={(event) => { setRange({ ...range, endTime: event.target.value }); setError(""); }} />
+            </label>
+            <p className="mailHint">时间按本机时区计算。指定时间段同步不会改变增量同步进度。</p>
+          </div>
+        )}
+        {error && <p className="mailFeedback error">{error}</p>}
+        <div className="dialogActions">
+          <button type="button" className="ghostButton" onClick={onClose}>取消</button>
+          <button type="submit" className="primaryButton">开始同步</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function createDefaultSyncRange(days) {
+  const end = new Date();
+  const start = new Date(end.getTime() - Math.max(1, days) * 86400000);
+  return { startTime: toDateTimeLocal(start), endTime: toDateTimeLocal(end) };
+}
+
+function toDateTimeLocal(date) {
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function formatSyncRange(startTime, endTime) {
+  if (!startTime || !endTime) return "指定时间段";
+  const format = (value) => new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(new Date(value));
+  return `${format(startTime)} 至 ${format(endTime)}`;
 }
 
 function MailSettingsDialog({ onClose, onSaved }) {
@@ -1490,10 +1943,141 @@ function PreviewModal({ preview, onClose }) {
               ))}
             </div>
           )}
-          {url ? <iframe title={currentItem.name || preview.doc.name} src={url}></iframe> : <div className="emptyPreview">没有可预览的 PDF</div>}
+          {url
+            ? (currentItem.fileType === "image" || currentItem.fileBlob?.type?.startsWith("image/")
+              ? <img className="previewImage" alt={currentItem.name || preview.doc.name} src={url} />
+              : <iframe title={currentItem.name || preview.doc.name} src={url}></iframe>)
+            : <div className="emptyPreview">没有可预览的单据</div>}
         </div>
       </div>
     </div>
+  );
+}
+
+function ReimbursementsWorkspace({
+  reimbursements,
+  statusFilter,
+  onStatusFilterChange,
+  onCreate,
+  onOpen,
+  onDelete,
+  onStatusChange,
+}) {
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    return reimbursements.filter((item) => {
+      if (statusFilter !== "all" && normalizeReimbursementStatus(item.status) !== statusFilter) return false;
+      if (!keyword) return true;
+      return [item.name, formatPeriod(item), money(item.totalAmount), getReimbursementStatusMeta(item.status).label]
+        .join(" ")
+        .toLowerCase()
+        .includes(keyword);
+    });
+  }, [query, reimbursements, statusFilter]);
+  const filters = [
+    { value: "all", label: "全部", count: reimbursements.length },
+    ...REIMBURSEMENT_STATUSES.map((status) => ({
+      value: status.value,
+      label: status.label,
+      count: reimbursements.filter((item) => normalizeReimbursementStatus(item.status) === status.value).length,
+    })),
+  ];
+
+  return (
+    <>
+      <header className="topbar sectionTopbar">
+        <div>
+          <span className="pageEyebrow">工作区</span>
+          <h1>报销记录</h1>
+          <p>在一个列表里查找、筛选并推进每笔报销。</p>
+        </div>
+        <button className="primaryButton" onClick={onCreate}><Plus size={17} />新建报销</button>
+      </header>
+
+      <div className="recordsWorkspace">
+        <div className="recordsToolbar">
+          <div className="searchBox recordsSearch">
+            <Search size={17} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、周期、金额或状态" />
+          </div>
+          <div className="statusFilters" role="group" aria-label="按报销状态筛选">
+            {filters.map((filter) => (
+              <button
+                type="button"
+                key={filter.value}
+                className={statusFilter === filter.value ? "active" : ""}
+                onClick={() => onStatusFilterChange(filter.value)}
+              >
+                {filter.label}<span>{filter.count}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <section className="recordsPanel">
+          {filtered.length > 0 ? (
+            <div className="recordsTableWrap">
+              <table className="recordsTable">
+                <thead>
+                  <tr>
+                    <th>报销</th>
+                    <th>状态</th>
+                    <th>金额</th>
+                    <th>单据</th>
+                    <th>报销周期</th>
+                    <th>到账日期</th>
+                    <th className="actionCol" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((item) => (
+                    <tr key={item.id}>
+                      <td>
+                        <button type="button" className="recordNameButton" onClick={() => onOpen(item.id)}>
+                          <strong>{item.name}</strong>
+                          <span>{formatDateTime(item.createdAt)}</span>
+                        </button>
+                      </td>
+                      <td>
+                        <select
+                          className="recordStatusSelect"
+                          data-status={normalizeReimbursementStatus(item.status)}
+                          aria-label={`修改“${item.name}”的状态`}
+                          value={normalizeReimbursementStatus(item.status)}
+                          onChange={(event) => onStatusChange(item, event.target.value)}
+                        >
+                          {REIMBURSEMENT_STATUSES.map((status) => (
+                            <option key={status.value} value={status.value}>{status.label}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="recordAmount">¥{money(item.totalAmount)}</td>
+                      <td>{item.documentCount} 张</td>
+                      <td className="recordMuted">{formatPeriod(item) || "未设置"}</td>
+                      <td className="recordMuted">{isReimbursementReceived(item) ? formatReceivedDate(item.receivedAt) || "已到账" : "—"}</td>
+                      <td>
+                        <div className="rowActions recordActions">
+                          <button title="打开报销" onClick={() => onOpen(item.id)}><ChevronRight size={17} /></button>
+                          <button title="删除报销" onClick={() => onDelete(item)}><Trash2 size={16} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="emptyState recordsEmpty">
+              <ReceiptText size={32} />
+              <strong>{reimbursements.length === 0 ? "还没有报销记录" : "没有符合条件的报销"}</strong>
+              <span>{reimbursements.length === 0 ? "新建一笔报销后，它会在这里按状态集中管理。" : "调整状态筛选或换一个关键词。"}</span>
+              {reimbursements.length === 0 && <button className="primaryButton" onClick={onCreate}><Plus size={17} />新建报销</button>}
+            </div>
+          )}
+        </section>
+      </div>
+    </>
   );
 }
 
@@ -1504,151 +2088,167 @@ function DashboardWorkspace({
   busy,
   canMailSync,
   onSync,
-  onFullSync,
-  onOpenSettings,
   onOpenInbox,
+  onOpenReimbursements,
   onOpenReimbursement,
+  onUpload,
 }) {
+  const [trendMode, setTrendMode] = useState("received");
+  const uploadInputRef = useRef(null);
+  const onPickFiles = () => uploadInputRef.current?.click();
   const totalAmount = reimbursements.reduce((sum, item) => sum + Number(item.totalAmount || 0), 0);
   const totalCount = reimbursements.reduce((sum, item) => sum + Number(item.documentCount || 0), 0);
+  const statusStats = useMemo(() => REIMBURSEMENT_STATUSES.map((status) => {
+    const items = reimbursements.filter((item) => normalizeReimbursementStatus(item.status) === status.value);
+    return {
+      ...status,
+      count: items.length,
+      amount: items.reduce((sum, item) => sum + Number(item.totalAmount || 0), 0),
+    };
+  }), [reimbursements]);
+  const receivedStat = statusStats.find((item) => item.value === "received");
+  const receivedAmount = receivedStat?.amount || 0;
+  const pendingAmount = Math.max(totalAmount - receivedAmount, 0);
+  const receivedProgress = totalAmount > 0 ? Math.round((receivedAmount / totalAmount) * 100) : 0;
+  const recent = [...reimbursements].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 5);
+  const pendingStatusStats = statusStats.slice(0, 2).filter((status) => status.count > 0);
+  const hasTodos = inboxCount > 0 || pendingStatusStats.length > 0;
 
-  const months = useMemo(() => {
-    const now = new Date();
-    const list = [];
-    for (let i = 5; i >= 0; i -= 1) {
-      const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      list.push({
-        key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
-        label: `${date.getMonth() + 1}月`,
-        full: `${date.getFullYear()}年${date.getMonth() + 1}月`,
-        amount: 0,
-        count: 0,
-      });
-    }
-    const index = new Map(list.map((month) => [month.key, month]));
-    for (const doc of docs) {
-      const date = formatInvoiceDate(doc.invoiceDate) || String(doc.uploadedAt || "").slice(0, 10);
-      const month = index.get(date.slice(0, 7));
-      if (!month) continue;
-      month.amount += Number(doc.amount || 0);
-      month.count += 1;
-    }
-    for (const month of list) month.amount = Math.round(month.amount * 100) / 100;
-    return list;
-  }, [docs]);
-
+  const documentMonths = useMemo(() => buildRecentMonths(
+    docs,
+    (doc) => formatInvoiceDate(doc.invoiceDate) || String(doc.uploadedAt || "").slice(0, 10),
+    (doc) => Number(doc.amount || 0)
+  ), [docs]);
+  const receivedMonths = useMemo(() => buildRecentMonths(
+    reimbursements.filter(isReimbursementReceived),
+    (item) => item.receivedAt,
+    (item) => Number(item.totalAmount || 0)
+  ), [reimbursements]);
+  const months = trendMode === "received" ? receivedMonths : documentMonths;
   const hasTrend = months.some((month) => month.count > 0);
-  const topReimbursements = [...reimbursements]
-    .sort((a, b) => Number(b.totalAmount || 0) - Number(a.totalAmount || 0))
-    .slice(0, 6);
-  const maxAmount = Math.max(...topReimbursements.map((item) => Number(item.totalAmount || 0)), 1);
 
   return (
     <>
-      <header className="topbar">
+      <header className="topbar sectionTopbar">
         <div>
-          <h1>首页</h1>
-          <p>{reimbursements.length > 0 ? `${reimbursements.length} 个报销 · ${totalCount} 张单据` : "创建报销，或从邮箱同步发票开始"}</p>
+          <span className="pageEyebrow">本地财务账台</span>
+          <h1>总览</h1>
+          <p>{reimbursements.length > 0 ? `${reimbursements.length} 个报销 · ${totalCount} 张单据` : "上传发票或新建报销，从这里开始。"}</p>
+        </div>
+        <div className="topActions">
+          <button className="ghostButton" onClick={() => onOpenReimbursements("all")}>查看报销记录<ChevronRight size={16} aria-hidden="true" /></button>
+          <button className="primaryButton" disabled={Boolean(busy)} onClick={onPickFiles}>
+            <Upload size={17} aria-hidden="true" />
+            上传发票
+          </button>
         </div>
       </header>
 
-      <div className="dashboard">
-        <div className="statRow">
-          <div className="statTile heroTile">
-            <label>报销总金额</label>
-            <strong>¥{money(totalAmount)}</strong>
-          </div>
-          <div className="statTile">
-            <label>单据总数</label>
-            <strong>{totalCount}</strong>
-          </div>
-          <div className="statTile">
-            <label>报销个数</label>
-            <strong>{reimbursements.length}</strong>
-          </div>
-          <button type="button" className="statTile clickable" onClick={onOpenInbox}>
-            <label>待分配发票</label>
-            <strong>{inboxCount}</strong>
-          </button>
-        </div>
+      <input
+        ref={uploadInputRef}
+        type="file"
+        accept={UPLOAD_ACCEPT}
+        multiple
+        hidden
+        onChange={(event) => {
+          onUpload(event.target.files);
+          event.target.value = "";
+        }}
+      />
 
-        <div className={`dashRow ${canMailSync ? "" : "single"}`}>
-          <section className="dashCard">
-            <div className="dashCardHeader">
-              <strong>近 6 个月单据金额</strong>
-              <span>按开票日期统计</span>
+      <div className="dashboard overviewDashboard">
+        <section className="fundingRail">
+          <div className="fundingRailSummary">
+            <div>
+              <span>报销总额</span>
+              <strong>¥{money(totalAmount)}</strong>
+              <em>{receivedProgress}% 已到账</em>
             </div>
-            {hasTrend ? (
-              <MonthlyLineChart months={months} />
+            <dl>
+              <div><dt>已到账</dt><dd>¥{money(receivedAmount)}</dd></div>
+              <div><dt>待到账</dt><dd>¥{money(pendingAmount)}</dd></div>
+            </dl>
+          </div>
+          <div className="statusRail" aria-label="报销资金状态轨">
+            {statusStats.map((status, index) => (
+              <button type="button" key={status.value} data-status={status.value} onClick={() => onOpenReimbursements(status.value)}>
+                <span className="railMarker">{index + 1}</span>
+                <span className="railLabel"><strong>{status.label}</strong><em>{status.description}</em></span>
+                <span className="railValue"><strong>¥{money(status.amount)}</strong><em>{status.count} 笔</em></span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <div className="overviewGrid">
+          <section className="overviewSection todoSection">
+            <div className="sectionHeading">
+              <div><strong>待处理</strong><span>只显示下一步需要关注的事项</span></div>
+            </div>
+            {hasTodos ? (
+              <div className="todoList">
+                {inboxCount > 0 && (
+                  <div className="todoRow">
+                    <span className="todoIcon"><Inbox size={18} /></span>
+                    <span><strong>{inboxCount} 张发票待分配</strong><em>移入对应报销后才会参与金额统计</em></span>
+                    <div className="todoActions"><button type="button" onClick={onOpenInbox}>打开<ChevronRight size={15} /></button></div>
+                  </div>
+                )}
+                {pendingStatusStats.map((status) => (
+                  <div className="todoRow" key={status.value}>
+                    <span className="todoIndex">{status.value === "collecting" ? "整" : "报"}</span>
+                    <span><strong>{status.count} 笔{status.label}</strong><em>{status.description}</em></span>
+                    <div className="todoActions"><button type="button" onClick={() => onOpenReimbursements(status.value)}>查看<ChevronRight size={15} /></button></div>
+                  </div>
+                ))}
+              </div>
             ) : (
-              <div className="chartEmpty">上传或同步发票后，这里会显示金额趋势</div>
+              <div className="todoClear">
+                <span className="todoIcon"><Inbox size={18} /></span>
+                <span><strong>当前没有待处理事项</strong><em>发票箱已清空，也没有进行中的报销。</em></span>
+                {canMailSync && <button type="button" disabled={Boolean(busy)} onClick={onSync}><RefreshCw size={15} />同步邮箱</button>}
+              </div>
             )}
           </section>
 
-          {canMailSync && (
-            <section className="dashCard syncCard">
-              <div className="dashCardHeader">
-                <strong>邮箱同步</strong>
-                <button
-                  type="button"
-                  className="ghostButton iconOnlyButton"
-                  title="邮箱同步设置"
-                  disabled={Boolean(busy)}
-                  onClick={onOpenSettings}
-                >
-                  <Settings size={17} />
-                </button>
+          <section className="overviewSection recentSection">
+            <div className="sectionHeading">
+              <div><strong>最近报销</strong><span>按创建时间排列</span></div>
+              <button type="button" onClick={() => onOpenReimbursements("all")}>全部记录</button>
+            </div>
+            {recent.length > 0 ? (
+              <div className="recentRecords">
+                {recent.map((item) => (
+                  <button type="button" key={item.id} onClick={() => onOpenReimbursement(item.id)}>
+                    <span><strong>{item.name}</strong><em>{item.documentCount} 张单据 · {formatPeriod(item) || "未设置周期"}</em></span>
+                    <span className="recentRecordValue"><strong>¥{money(item.totalAmount)}</strong><ReimbursementStatusBadge item={item} compact /></span>
+                  </button>
+                ))}
               </div>
-              <p className="syncCardText">
-                {inboxCount > 0 ? `有 ${inboxCount} 张发票待分配到报销` : "从邮箱拉取发票附件，自动识别金额、发票号和日期"}
-              </p>
-              <div className="syncCardActions">
-                <button className="primaryButton" disabled={Boolean(busy)} onClick={onSync}>
-                  <RefreshCw size={17} />
-                  同步邮箱
-                </button>
-                <button className="ghostButton" disabled={Boolean(busy)} onClick={onOpenInbox}>
-                  <Inbox size={17} />
-                  查看待分配{inboxCount > 0 ? `（${inboxCount}）` : ""}
-                </button>
-                <button
-                  className="ghostButton"
-                  disabled={Boolean(busy)}
-                  title="忽略同步进度，重新拉取时间范围内的全部邮件；已有发票自动去重"
-                  onClick={onFullSync}
-                >
-                  <RotateCcw size={17} />
-                  全部重新拉取
-                </button>
-              </div>
-            </section>
-          )}
+            ) : (
+              <div className="compactEmpty">还没有报销记录。</div>
+            )}
+          </section>
         </div>
 
-        <section className="dashCard">
-          <div className="dashCardHeader">
-            <strong>各报销金额对比</strong>
-            <span>点击进入对应报销</span>
-          </div>
-          {topReimbursements.length > 0 ? (
-            <div className="barList">
-              {topReimbursements.map((item) => (
-                <button type="button" key={item.id} className="barRow" onClick={() => onOpenReimbursement(item.id)}>
-                  <span className="barName" title={item.name}>{item.name}</span>
-                  <span className="barTrack">
-                    <span
-                      className="barFill"
-                      style={{
-                        width: `${Math.max((Number(item.totalAmount || 0) / maxAmount) * 100, Number(item.totalAmount || 0) > 0 ? 2 : 0)}%`,
-                      }}
-                    />
-                  </span>
-                  <span className="barValue">¥{money(item.totalAmount || 0)}</span>
-                </button>
-              ))}
+        <section className="overviewSection trendSection">
+          <div className="sectionHeading">
+            <div><strong>{trendMode === "received" ? "到账走势" : "单据走势"}</strong><span>{trendMode === "received" ? "按到账日期统计近 6 个月" : "按开票日期统计近 6 个月"}</span></div>
+            <div className="trendSwitch" role="group" aria-label="金额趋势统计口径">
+              <button type="button" className={trendMode === "received" ? "active" : ""} onClick={() => setTrendMode("received")}>到账</button>
+              <button type="button" className={trendMode === "documents" ? "active" : ""} onClick={() => setTrendMode("documents")}>单据</button>
             </div>
+          </div>
+          {hasTrend ? (
+            <MonthlyLineChart
+              months={months}
+              unit={trendMode === "received" ? "笔" : "张"}
+              ariaLabel={trendMode === "received" ? "近 6 个月到账金额趋势" : "近 6 个月单据金额趋势"}
+            />
           ) : (
-            <div className="chartEmpty">还没有报销，点击左侧「新建报销」创建一个</div>
+            <div className="chartEmpty compactChartEmpty">
+              {trendMode === "received" ? "将报销标记为“已到账”后，这里会形成到账曲线。" : "上传或同步发票后，这里会形成单据曲线。"}
+            </div>
           )}
         </section>
       </div>
@@ -1656,7 +2256,32 @@ function DashboardWorkspace({
   );
 }
 
-function MonthlyLineChart({ months }) {
+function buildRecentMonths(items, getDate, getAmount) {
+  const now = new Date();
+  const list = [];
+  for (let i = 5; i >= 0; i -= 1) {
+    const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    list.push({
+      key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
+      label: `${date.getMonth() + 1}月`,
+      full: `${date.getFullYear()}年${date.getMonth() + 1}月`,
+      amount: 0,
+      count: 0,
+    });
+  }
+  const index = new Map(list.map((month) => [month.key, month]));
+  for (const item of items) {
+    const date = String(getDate(item) || "");
+    const month = index.get(date.slice(0, 7));
+    if (!month) continue;
+    month.amount += Number(getAmount(item) || 0);
+    month.count += 1;
+  }
+  for (const month of list) month.amount = Math.round(month.amount * 100) / 100;
+  return list;
+}
+
+function MonthlyLineChart({ months, unit = "张", ariaLabel = "近 6 个月金额趋势" }) {
   const [hoverIdx, setHoverIdx] = useState(null);
   const VB_W = 640;
   const VB_H = 230;
@@ -1699,14 +2324,14 @@ function MonthlyLineChart({ months }) {
         <div className="chartTip" style={{ left: `${Math.min(86, Math.max(14, (hover.x / VB_W) * 100))}%` }}>
           <span className="chartTipKey" />
           <strong>¥{money(hover.amount)}</strong>
-          <span>{hover.full} · {hover.count} 张</span>
+          <span>{hover.full} · {hover.count} {unit}</span>
         </div>
       )}
       <svg
         className="lineChart"
         viewBox={`0 0 ${VB_W} ${VB_H}`}
         role="img"
-        aria-label="近 6 个月单据金额趋势"
+        aria-label={ariaLabel}
         onPointerMove={handlePointerMove}
         onPointerLeave={() => setHoverIdx(null)}
       >
@@ -1765,30 +2390,42 @@ function InboxWorkspace({
   onAutoAssign,
   onDelete,
   onPreview,
+  onReparse,
+  onUpload,
 }) {
+  const [sortConfig, setSortConfig] = useState({ field: "sourceDate", direction: "desc" });
   const selectedDocs = docs.filter((doc) => selectedIds.has(doc.id));
   const selectedCount = selectedDocs.length;
   const totalAmount = docs.reduce((sum, doc) => sum + Number(doc.amount || 0), 0);
+  const sortedDocs = useMemo(() => sortDocuments(docs, sortConfig), [docs, sortConfig]);
+
+  function handleSort(field) {
+    setSortConfig((current) => ({
+      field,
+      direction: current.field === field && current.direction === "asc" ? "desc" : "asc",
+    }));
+  }
 
   return (
     <>
       <header className="topbar">
         <div>
-          <h1>邮箱同步</h1>
+          <h1>发票箱</h1>
           <p>
             {docs.length > 0
               ? `${docs.length} 张发票待分配，合计 ${money(totalAmount)} 元 · 移动到报销后参与统计`
-              : "从邮箱拉取发票附件，在这里分配到各个报销"}
+              : "手动上传或从邮箱拉取发票，在这里分配到各个报销"}
           </p>
         </div>
         <div className="topActions">
           <button
             className="ghostButton iconOnlyButton"
             title="邮箱同步设置"
+            aria-label="邮箱同步设置"
             disabled={Boolean(busy)}
             onClick={onOpenSettings}
           >
-            <Settings size={17} />
+            <Settings size={17} aria-hidden="true" />
           </button>
           <button
             className="ghostButton"
@@ -1796,15 +2433,21 @@ function InboxWorkspace({
             disabled={Boolean(busy)}
             onClick={onFullSync}
           >
-            <RotateCcw size={17} />
-            全部重新拉取
+            <RotateCcw size={17} aria-hidden="true" />
+            指定时间段
           </button>
           <button className="primaryButton" disabled={Boolean(busy)} onClick={onSync}>
-            <RefreshCw size={17} />
+            <RefreshCw size={17} aria-hidden="true" />
             同步邮箱
           </button>
         </div>
       </header>
+
+      <UploadBand
+        busy={busy}
+        hint="上传的发票先进发票箱，选中后移动到对应报销"
+        onFiles={onUpload}
+      />
 
       <section className="panel inboxPanel">
         <div className="panelToolbar">
@@ -1815,6 +2458,15 @@ function InboxWorkspace({
             <button className="ghostButton" disabled={selectedCount === 0} onClick={() => onMove(selectedDocs)}>
               <FolderInput size={17} />
               移动到报销
+            </button>
+            <button
+              className="ghostButton"
+              disabled={docs.length === 0 || Boolean(busy)}
+              title={selectedCount > 0 ? "重新识别选中的发票" : "未选中时重新识别全部待分配发票"}
+              onClick={() => onReparse(selectedCount > 0 ? selectedDocs : docs)}
+            >
+              <RefreshCw size={17} />
+              重新识别
             </button>
             <button
               className="ghostButton"
@@ -1848,16 +2500,16 @@ function InboxWorkspace({
                     onChange={onToggleAll}
                   />
                 </th>
-                <th>发票</th>
-                <th>金额</th>
-                <th>开票日期</th>
-                <th>来源邮件</th>
-                <th>邮件日期</th>
+                <SortableTh field="name" sortConfig={sortConfig} onSort={handleSort}>发票</SortableTh>
+                <SortableTh field="amount" sortConfig={sortConfig} onSort={handleSort}>金额</SortableTh>
+                <SortableTh field="invoiceDate" sortConfig={sortConfig} onSort={handleSort}>开票日期</SortableTh>
+                <SortableTh field="sourceSubject" sortConfig={sortConfig} onSort={handleSort}>来源邮件</SortableTh>
+                <SortableTh field="sourceDate" sortConfig={sortConfig} onSort={handleSort}>邮件日期</SortableTh>
                 <th className="actionCol"></th>
               </tr>
             </thead>
             <tbody>
-              {docs.map((doc) => (
+              {sortedDocs.map((doc) => (
                 <tr key={doc.id} className={selectedIds.has(doc.id) ? "selectedRow" : ""}>
                   <td>
                     <input type="checkbox" checked={selectedIds.has(doc.id)} onChange={() => onToggle(doc.id)} />
@@ -1884,6 +2536,7 @@ function InboxWorkspace({
                   <td>
                     <div className="rowActions">
                       <button title="预览" onClick={() => onPreview(doc)}><Eye size={16} /></button>
+                      <button title="重新识别" disabled={!doc.fileBlob || Boolean(busy)} onClick={() => onReparse([doc])}><RefreshCw size={16} /></button>
                       <button title="移动到报销" onClick={() => onMove([doc])}><FolderInput size={16} /></button>
                     </div>
                   </td>
@@ -1909,14 +2562,22 @@ function ReimbursementDialog({ mode, initial, onClose, onSave }) {
   const [name, setName] = useState(initial?.name || "");
   const [periodStart, setPeriodStart] = useState(initial?.periodStart || "");
   const [periodEnd, setPeriodEnd] = useState(initial?.periodEnd || "");
+  const [status, setStatus] = useState(normalizeReimbursementStatus(initial?.status));
+  const [receivedAt, setReceivedAt] = useState(initial?.receivedAt || "");
+
+  function chooseStatus(nextStatus) {
+    setStatus(nextStatus);
+    if (nextStatus === "received" && !receivedAt) setReceivedAt(todayDateValue());
+    if (nextStatus !== "received") setReceivedAt("");
+  }
 
   return (
     <div className="modalBackdrop">
       <form
-        className="dialog"
+        className="dialog reimbursementDialog"
         onSubmit={(event) => {
           event.preventDefault();
-          onSave({ name, periodStart, periodEnd });
+          onSave({ name, periodStart, periodEnd, status, receivedAt });
         }}
       >
         <div className="dialogHeader">
@@ -1927,6 +2588,32 @@ function ReimbursementDialog({ mode, initial, onClose, onSave }) {
           <span>名称</span>
           <input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：2026年7月差旅" />
         </label>
+        <fieldset className="statusFieldset">
+          <legend>报销状态</legend>
+          <div className="statusOptions">
+            {REIMBURSEMENT_STATUSES.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={status === option.value ? "active" : ""}
+                data-status={option.value}
+                aria-pressed={status === option.value}
+                onClick={() => chooseStatus(option.value)}
+              >
+                <span className="statusDot" aria-hidden="true" />
+                <strong>{option.label}</strong>
+                <em>{option.description}</em>
+              </button>
+            ))}
+          </div>
+        </fieldset>
+        {status === "received" && (
+          <label className="mailField receivedDateField">
+            <span>到账日期</span>
+            <input type="date" required value={receivedAt} onChange={(event) => setReceivedAt(event.target.value)} />
+            <em>到账金额按当前报销内的单据合计计算，并自动纳入首页统计。</em>
+          </label>
+        )}
         <div className="mailFormRow">
           <label className="mailField">
             <span>周期开始（可选）</span>
@@ -1937,7 +2624,7 @@ function ReimbursementDialog({ mode, initial, onClose, onSave }) {
             <input type="date" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} />
           </label>
         </div>
-        <p className="mailHint">设置周期后，导入或移入开票日期不在周期内的发票会提示；邮箱同步页可按周期自动分配。</p>
+        <p className="mailHint">设置周期后，导入或移入开票日期不在周期内的发票会提示；发票箱可按周期自动分配。</p>
         <div className="dialogActions">
           <button type="button" className="ghostButton" onClick={onClose}>取消</button>
           <button type="submit" className="primaryButton">保存</button>

@@ -10,15 +10,26 @@ release/
 # 脚本生成的资源（npm install / npm run build 时自动重建）
 # - public/cmaps、public/standard_fonts：scripts/prepare-pdf-assets.mjs
 # - electron/vendor：scripts/prepare-mail-deps.mjs
+# - tools/runtime：scripts/prepare-python-runtime.mjs（内嵌 Python + RapidOCR + 模型，打包时自动构建）
 public/cmaps/
 public/standard_fonts/
 electron/vendor/
+tools/runtime/
 
 # Python 虚拟环境（重建：python -m venv .venv && .venv/Scripts/pip install -r requirements.txt）
 .venv/
 
 # 个人发票样本（隐私数据，不入库）
 pdf/
+tools/_fixtures/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 本机个人笔记与旧备份
+thoughts.md
+tools/_old_parse_pdf.py
 
 # 日志与临时文件
 *.log

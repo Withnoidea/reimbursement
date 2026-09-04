@@ -7,6 +7,9 @@ contextBridge.exposeInMainWorld("desktopApi", {
   parsePdf(filePath) {
     return ipcRenderer.invoke("parse-pdf-native", filePath);
   },
+  parsePdfData(data, fileName) {
+    return ipcRenderer.invoke("parse-pdf-data", data, fileName);
+  },
   loadMailConfig() {
     return ipcRenderer.invoke("mail-config-load");
   },
@@ -28,5 +31,25 @@ contextBridge.exposeInMainWorld("desktopApi", {
     const listener = (_event, action) => callback(action);
     ipcRenderer.on("menu-action", listener);
     return () => ipcRenderer.removeListener("menu-action", listener);
+  },
+  updaterVersion() {
+    return ipcRenderer.invoke("updater-version");
+  },
+  updaterCheck() {
+    return ipcRenderer.invoke("updater-check");
+  },
+  updaterInstall() {
+    return ipcRenderer.invoke("updater-install");
+  },
+  updaterSettingsLoad() {
+    return ipcRenderer.invoke("updater-settings-load");
+  },
+  updaterSettingsSave(settings) {
+    return ipcRenderer.invoke("updater-settings-save", settings);
+  },
+  onUpdaterState(callback) {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on("updater-state", listener);
+    return () => ipcRenderer.removeListener("updater-state", listener);
   },
 });
